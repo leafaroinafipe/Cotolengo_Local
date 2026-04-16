@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="NurseShift Pro — Sistema de Gestão de Escalas de Enfermagem do Cotolengo">
+    <title>NurseShift Pro — Cotolengo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=3.3">
+</head>
+<body>
+
+<!-- TOAST -->
+<div id="toastContainer" class="toast-container"></div>
+
+<!-- SPLASH SCREEN -->
+<div id="splashScreen" class="screen active splash-screen">
+    <div class="splash-bg">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+    <div class="splash-content">
+        <div class="splash-logo">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none">
+                <path d="M12 2L4 7V12C4 16.5 7 20.5 12 22C17 20.5 20 16.5 20 12V7L12 2Z" fill="white" opacity="0.9"/>
+                <path d="M12 8V16M8 12H16" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+            </svg>
+        </div>
+        <h1 class="splash-title">Sistema di Gestione del Personale</h1>
+        <p class="splash-sub">Caricamento moduli...</p>
+    </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="mainApp" class="screen">
+    <!-- Fundo Translúcido Espacial Escuro Injetado -->
+    <div class="main-bg">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+
+    <header class="app-header">
+        <div class="header-brand">
+            <div class="header-logo">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                    <path d="M12 2L4 7V12C4 16.5 7 20.5 12 22C17 20.5 20 16.5 20 12V7L12 2Z" fill="white"/>
+                    <path d="M12 8V16M8 12H16" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+                </svg>
+            </div>
+            <span class="header-name">NurseShift Pro</span>
+        </div>
+        <div class="header-right">
+            <div class="user-chip">
+                <div class="user-av" id="userAvatar">C</div>
+                <span id="userInfo">Coordinatrice</span>
+            </div>
+            <button onclick="logout()" class="btn-logout" title="Esci">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Floating Top Pending Card (Coordenator only) -->
+    <div id="topPendingCard" style="display:none; position: absolute; top: 72px; right: 24px; z-index: 100;
+        background: #ffffff; border: 1px solid var(--border); border-left: 3px solid var(--danger);
+        padding: 8px 14px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
+        align-items: center; gap: 8px; cursor: pointer; transition: transform 0.2s;"
+        onclick="document.getElementById('navReqBtn').click()"
+        onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='none'">
+        <div style="font-size: 14px;">🔔</div>
+        <div style="font-size: 13px; font-weight: 700; color: var(--text);">
+            <span id="topPendingText" style="color:var(--danger)">0</span> <span style="font-weight: 500; font-size:12px; color:var(--text-3); margin-left:2px;">Richieste in sospeso</span>
+        </div>
+        <div style="color: var(--text-3); font-weight:700; font-size:11px; margin-left:6px; opacity:0.8">➔</div>
+    </div>
+
+<!-- Nav -->
+<nav class="app-nav">
+    <button class="nav-btn active" onclick="showTab('calendar', this)">🗓 Calendario</button>
+    <button class="nav-btn" onclick="showTab('reports', this)">📊 Report</button>
+    <button class="nav-btn" onclick="showTab('requests', this)" id="navReqBtn">
+        🔔 Risorse Umane <span class="badge" id="pendingBadge" style="display:none">0</span>
+    </button>
+</nav>
+
+<!-- MAIN CONTENT -->
+    <div id="calendarTab" class="tab-pane active">
+        <div class="cal-toolbar">
+            <div class="month-nav" style="display:flex; align-items:center; gap:24px;">
+                <button onclick="changeMonth(-1)" class="btn-nav">◀</button>
+                <div style="display:flex; flex-direction:column; align-items:center;">
+                    <h2 id="monthYear" class="month-lbl" style="margin-bottom:0;">Janeiro 2026</h2>
+                </div>
+                <button onclick="changeMonth(1)" class="btn-nav">▶</button>
+            </div>
+            <div class="toolbar-actions">
+                <button onclick="openManageNursesModal()" class="btn-primary-out" id="manageNursesBtn" style="padding:12px 16px; margin-right:4px;">👥 Gestisci Personale</button>
+                <button onclick="clearSchedule()" class="btn-danger-out" id="clearBtn" style="display:none; padding:12px 16px; margin-right:4px;">🗑 Svuota Mese</button>
+                <button onclick="openHourLimitModal()" class="btn-generate" id="generateBtn" style="display:none">⚡ Genera Turni</button>
+                <button onclick="exportSchedule()" class="btn-export" id="exportBtn" title="Esporta PDF">⬇ Esporta</button>
+                <button onclick="publishToCloud()" class="btn-generate" id="publishBtn" style="background:linear-gradient(135deg,#10b981,#059669); margin-left:4px;" title="Pubblica i turni nel cloud per l'App Mobile">☁️ Pubblica in Cloud</button>
+            </div>
+        </div>
+        <div class="shift-legend" id="shiftLegend"></div>
+        <div class="cal-scroll">
+            <table id="calendarTable" class="cal-table">
+                <thead><tr id="calendarDays"></tr></thead>
+                <tbody id="calendarBody"></tbody>
+            </table>
+        </div>
+        <!-- CALENDAR SUMMARY -->
+        <div class="cal-summary-section" style="display:none" id="calSummarySection">
+            <h3 class="cal-summary-title">Riepilogo Generale del Mese</h3>
+            <div class="cal-summary-table-wrap">
+                <table class="rpt-table" id="calendarSummaryTable"></table>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB: REPORTS -->
+    <div id="reportsTab" class="tab-pane">
+        <div class="reports-wrap">
+            <div class="rpt-header">
+                <h2>Report delle Ore</h2>
+                <span class="rpt-month" id="reportMonth"></span>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-card stat-primary">
+                    <div class="stat-lbl">Totale Lavorato</div>
+                    <div class="stat-val" id="totalHoursReport">0.0h</div>
+                </div>
+                <div class="stat-card stat-success">
+                    <div class="stat-lbl">Giorni Lavorati</div>
+                    <div class="stat-val" id="workDaysReport">0</div>
+                </div>
+                <div class="stat-card stat-warning">
+                    <div class="stat-lbl">Giorni di Riposo</div>
+                    <div class="stat-val" id="restDaysReport">0</div>
+                </div>
+                <div class="stat-card stat-night">
+                    <div class="stat-lbl">Turni di Notte</div>
+                    <div class="stat-val" id="nightShiftsReport">0</div>
+                </div>
+            </div>
+            <div class="report-section">
+                <h3>Distribuzione dei Turni</h3>
+                <div id="shiftsTable"></div>
+            </div>
+            <div id="nightQuotaSection" class="report-section" style="display:none">
+                <h3>Quota Turni Notturni</h3>
+                <div id="nightQuotaReport"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAB: CENTRAL RH (Merged Requests/Occurrences) -->
+    <div id="requestsTab" class="tab-pane">
+        <div class="rh-wrap">
+            <div class="rh-header">
+                <div>
+                    <h2>Risorse Umane e Occorrenze</h2>
+                    <p class="rh-subtitle">Registra ferie, assenze e certificati con allegati. Questi giorni saranno protetti nella Generazione AI dei turni.</p>
+                </div>
+                <button onclick="toggleRhForm()" class="btn-header-action" title="Inserisci Nuovo Record">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+                    <span>Inserisci Nuovo Record</span>
+                </button>
+            </div>
+            
+            <div class="rh-widescreen-layout">
+                <!-- Painel Expansível: Formulário -->
+                <div id="rhFormContainer" class="hidden" style="margin-bottom: 32px; animation: fadeIn 0.2s ease-out;">
+                <div class="rh-card rh-form-panel" style="padding: 32px 28px;">
+                    <h3 style="margin-bottom: 24px; color: var(--text); font-size: 20px; font-weight: 800; display:flex; align-items:center; gap:8px;">
+                        <span style="font-size: 24px;">➕</span> Inserisci Nuovo Record
+                    </h3>
+                    
+                    <div class="field-group" style="margin-bottom: 22px;">
+                        <label class="field-label" style="font-size: 14px; margin-bottom: 8px; font-weight: 700;">Infermiera Ricevente</label>
+                        <div class="sel-wrap">
+                            <select id="occNurse" class="field-sel" style="padding: 14px 16px; font-size: 15px;"><option value="">Seleziona il dipendente...</option></select>
+                        </div>
+                    </div>
+
+                    <div class="field-group" style="margin-bottom: 22px;">
+                        <label class="field-label" style="font-size: 14px; margin-bottom: 8px; font-weight: 700;">Classificazione Occorrenza</label>
+                        <div class="sel-wrap">
+                            <select id="occReason" class="field-sel" style="padding: 14px 16px; font-size: 15px;" onchange="toggleAttachmentUI()">
+                                <option value="FE">🏖️ Ferie Programmate (FE)</option>
+                                <option value="AT">🏥 Certificato Medico / Licenza (AT)</option>
+                                <option value="OFF">📋 Riposo Extra / Pratica HR (OFF)</option>
+                                <option value="OFF_INJ">⚠️ Assenza Ingiustificata (OFF_INJ)</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="date-range" style="margin-bottom: 22px;">
+                        <div class="field-group" style="margin-bottom: 0;">
+                            <label class="field-label" style="font-size: 14px; margin-bottom: 8px; font-weight: 700;">Data di Inizio</label>
+                            <input type="date" id="occStart" class="field-input" style="padding: 12px 14px; font-size: 15px;">
+                        </div>
+                        <div class="field-group" style="margin-bottom: 0;">
+                            <label class="field-label" style="font-size: 14px; margin-bottom: 8px; font-weight: 700;">Data Fine (inclusa)</label>
+                            <input type="date" id="occEnd" class="field-input" style="padding: 12px 14px; font-size: 15px;">
+                        </div>
+                    </div>
+                    
+                    <div class="field-group" style="margin-bottom: 22px;">
+                        <label class="field-label" style="font-size: 14px; margin-bottom: 8px; font-weight: 700;">Descrizione / Nota (Opzionale)</label>
+                        <input type="text" id="occDesc" class="field-input" style="padding: 14px 16px; font-size: 15px;" placeholder="Es: Certificato 10 giorni / Premio">
+                    </div>
+
+                    <!-- Upload Drag & Drop Panel -->
+                    <div id="attachmentPanel" class="upload-panel hidden">
+                        <label class="field-label" style="display:flex; justify-content:space-between; font-size: 14px; margin-bottom: 8px; font-weight: 700;">
+                            Allega Documento Comprovante <span style="font-size:11px; opacity:0.8; font-weight:normal; background:var(--warning); color:#fff; padding:2px 6px; border-radius:4px;">Obbligatorio per Certificati</span>
+                        </label>
+                        <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+                            <div class="upload-icon">☁️</div>
+                            <p class="upload-text"><strong>Trascina il Certificato</strong> o clicca nell'area</p>
+                            <p class="upload-sub">Formati accettati: PDF, PNG, JPG</p>
+                            <input type="file" id="fileInput" class="hidden" accept=".pdf,.png,.jpg,.jpeg" onchange="handleFileSelect(event)">
+                        </div>
+                        <div id="filePreviewTemplate" class="file-preview hidden">
+                            <div class="file-info">
+                                <span class="file-icon" style="font-size:24px;">📄</span>
+                                <div style="display:flex; flex-direction:column; align-items:flex-start;">
+                                    <span class="file-name" id="attachedFileName">atestado.pdf</span>
+                                    <span style="font-size:10px; color:var(--success); font-weight:700;">Allegato con successo ✓</span>
+                                </div>
+                            </div>
+                            <button class="btn-cls-sm" onclick="removeAttachment(event)" title="Rimuovi allegato" style="font-size:20px; font-weight:bold; color:var(--danger)">✕</button>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; gap:12px; margin-top: 24px;">
+                        <button onclick="addOccurrence()" class="btn-submit" style="margin-top: 0; padding: 16px; font-size: 16px; flex:2;">⏳ Salva e Invia per l'Approvazione</button>
+                        <button onclick="toggleRhForm()" class="btn-danger-submit" style="margin-top: 0; padding: 16px; font-size: 16px; flex:1; border:none; color:white; border-radius:var(--radius-sm); cursor:pointer;">✕ Annulla</button>
+                    </div>
+                </div>
+            </div>
+                
+            <!-- Occorrenze + Richieste side by side -->
+            <div class="rh-panels-grid">
+                    <div class="rh-panel-section">
+                        <h3 class="rh-section-title">
+                            <span>📚</span> Registro Occorrenze
+                        </h3>
+                        <div id="occTableBody" class="rh-cards-container">
+                        </div>
+                    </div>
+                    
+                    <div class="rh-panel-section">
+                        <h3 class="rh-section-title">
+                            <span>🔔</span> Richieste delle Infermiere
+                        </h3>
+                        <!-- Filters Bar -->
+                        <div class="req-filters-bar" id="reqFiltersBar">
+                            <div class="req-filter-chips">
+                                <button class="req-filter-chip active" data-filter="all" onclick="setReqStatusFilter('all', this)">Tutti</button>
+                                <button class="req-filter-chip" data-filter="pending" onclick="setReqStatusFilter('pending', this)">⏳ In attesa</button>
+                                <button class="req-filter-chip" data-filter="approved" onclick="setReqStatusFilter('approved', this)">✅ Approvati</button>
+                                <button class="req-filter-chip" data-filter="rejected" onclick="setReqStatusFilter('rejected', this)">❌ Rifiutati</button>
+                            </div>
+                            <div class="req-filter-selects">
+                                <select id="reqFilterNurse" class="req-filter-select" onchange="applyReqFilters()">
+                                    <option value="all">👤 Tutti i dipendenti</option>
+                                </select>
+                                <input type="date" id="reqFilterFrom" class="req-filter-date" onchange="applyReqFilters()" title="Da">
+                                <input type="date" id="reqFilterTo" class="req-filter-date" onchange="applyReqFilters()" title="A">
+                            </div>
+                        </div>
+                        <div id="requestsContent" class="rh-cards-container">
+                            <div class="empty-state" style="padding: 40px 20px;">
+                                <div class="empty-icon">📄</div>
+                                <p>Nessuna nuova richiesta per ora</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- DAY ACTIONS MODAL (Shift Picker Only) -->
+<div id="dayModal" class="modal-bd hidden" onclick="closeDayModal(event)">
+    <div class="modal-box" style="max-width: 420px; overflow: hidden;">
+        <div class="modal-hd">
+            <div>
+                <h3 class="modal-ttl">✏️ Modifica Turno</h3>
+                <p class="modal-sub" id="modalSubtitle"></p>
+            </div>
+            <button onclick="closeDayModal()" class="btn-cls">✕</button>
+        </div>
+        <div class="modal-body" style="padding: 24px;">
+            <div class="info-row" style="margin-bottom: 20px;">
+                <span class="info-lbl">Turno Attuale</span>
+                <span class="info-val" id="modalCurrentShift"></span>
+            </div>
+            <div id="dayShiftPicker"></div>
+        </div>
+    </div>
+</div>
+
+<!-- EDIT SHIFT MODAL -->
+<div id="editModal" class="modal-bd hidden" onclick="closeEditModal(event)">
+    <div class="modal-box">
+        <div class="modal-hd">
+            <div>
+                <h3 class="modal-ttl">Modifica Turno</h3>
+                <p class="modal-sub" id="editModalSub"></p>
+            </div>
+            <button onclick="closeEditModal()" class="btn-cls">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="shift-picker" id="shiftPicker"></div>
+        </div>
+    </div>
+</div>
+
+<!-- SWAP MODAL -->
+<div id="swapModal" class="modal-bd hidden" onclick="closeSwapModal(event)">
+    <div class="modal-box">
+        <div class="modal-hd"><h3 class="modal-ttl">Cambio Turno</h3><button onclick="closeSwapModal()" class="btn-cls">✕</button></div>
+        <div class="modal-body">
+            <div class="field-group"><label class="field-label">Il tuo turno attuale</label><input type="text" id="currentShiftDisplay" class="field-input" readonly></div>
+            <div class="field-group"><label class="field-label">Cambia con</label>
+                <div class="sel-wrap"><select id="swapNurseSelect" class="field-sel" onchange="onSwapNurseChange()"></select></div>
+            </div>
+            <div class="field-group"><label class="field-label">Data del cambio</label><input type="date" id="swapDateInput" class="field-input" onchange="onSwapDateChange()"></div>
+            <div class="field-group"><label class="field-label">Il suo turno nella data</label><input type="text" id="targetShiftDisplay" class="field-input" readonly></div>
+            <button onclick="submitSwapRequest()" class="btn-submit">Invia Richiesta di Cambio</button>
+        </div>
+    </div>
+</div>
+
+<!-- VACATION MODAL -->
+<div id="vacationModal" class="modal-bd hidden" onclick="closeVacationModal(event)">
+    <div class="modal-box">
+        <div class="modal-hd"><h3 class="modal-ttl">Richiedi Ferie</h3><button onclick="closeVacationModal()" class="btn-cls">✕</button></div>
+        <div class="modal-body">
+            <div class="date-range">
+                <div class="field-group"><label class="field-label">Inizio</label><input type="date" id="vacationStartDate" class="field-input"></div>
+                <div class="field-group"><label class="field-label">Fine</label><input type="date" id="vacationEndDate" class="field-input"></div>
+            </div>
+            <button onclick="submitVacationRequest()" class="btn-submit">Invia Richiesta</button>
+        </div>
+    </div>
+</div>
+
+<!-- JUSTIFIED ABSENCE MODAL -->
+<div id="justifiedModal" class="modal-bd hidden" onclick="closeJustifiedModal(event)">
+    <div class="modal-box">
+        <div class="modal-hd"><h3 class="modal-ttl">Assenza Giustificata</h3><button onclick="closeJustifiedModal()" class="btn-cls">✕</button></div>
+        <div class="modal-body">
+            <div class="field-group"><label class="field-label">Data</label><input type="text" id="fjDateDisplay" class="field-input" readonly></div>
+            <div class="field-group"><label class="field-label">Motivo</label><textarea id="fjReason" class="field-textarea" rows="4" placeholder="Descrivi il motivo..."></textarea></div>
+            <button onclick="submitJustifiedAbsence()" class="btn-submit">Invia Richiesta</button>
+        </div>
+    </div>
+</div>
+
+
+
+<!-- LOADING -->
+<div id="loadingOverlay" class="loading-ov hidden">
+    <div class="loading-card">
+        <div class="spinner"></div>
+        <p class="loading-txt">Generazione turni intelligenti...</p>
+        <p class="loading-sub">Applicazione regole aziendali</p>
+    </div>
+</div>
+
+<!-- MODAL: HOUR LIMITS (CUSTOM) -->
+<div id="hourLimitModal" class="modal-bd hidden">
+    <div class="modal-box" style="max-width: 500px">
+        <div class="modal-hd">
+            <div>
+                <div class="modal-ttl">⚙️ Ore Mensili per Infermiera</div>
+                <div class="modal-sub">Imposta il limite massimo di ore per ogni infermiera.</div>
+            </div>
+            <button onclick="closeHourLimitModal()" class="btn-cls">✕</button>
+        </div>
+        <div class="modal-body" style="gap: 16px;">
+            <div>
+                <h4 style="font-size: 13px; font-weight: 700; margin-bottom: 8px; color: var(--text-2); text-transform: uppercase;">Regolazioni Manuali delle Ore</h4>
+                <div id="hourLimitList" style="display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto;"></div>
+            </div>
+        </div>
+        <div style="padding: 0 28px 24px; display:flex; gap:10px;">
+            <button onclick="closeHourLimitModal()" class="btn-modal-cancel">Annulla</button>
+            <button onclick="confirmAndGenerateSchedule()" class="btn-submit" style="flex:2;">⚡ Salva ed Esegui AI</button>
+        </div>
+    </div>
+</div>
+
+<!-- MANAGE NURSES MODAL -->
+<div id="manageNursesModal" class="modal-bd hidden">
+    <div class="modal-box" style="max-width: 460px; width: 95%; margin: auto; overflow: hidden; display: flex; flex-direction: column; flex-shrink: 0;">
+        <div class="modal-hd">
+            <div>
+                <div class="modal-ttl">👥 Gestisci Personale</div>
+                <div class="modal-sub">Modifica il team infermieristico (si applica da questo mese)</div>
+            </div>
+            <button onclick="closeManageNursesModal()" class="btn-cls">✕</button>
+        </div>
+        
+        <div class="modal-body" style="padding: 24px; overflow-y: auto;">
+            <div style="margin-bottom: 24px;">
+                <h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text);">Lista nel Mese Attuale</h4>
+                <div id="activeNursesList" style="display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; padding-right: 8px;"></div>
+            </div>
+            
+            <div style="border-top: 1px solid var(--border); padding-top: 24px;">
+                <h4 style="font-size: 14px; margin-bottom: 16px; color: var(--text);">Aggiungi Nuovo Personale</h4>
+                <div class="field-group" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;">
+                    <label class="field-label" style="font-size: 14px; font-weight: 600;">Nome Completo</label>
+                    <input type="text" id="newNurseName" class="field-input" placeholder="Es: Anna Rossi" style="width: 100%; padding: 14px; font-size: 15px; border-radius: 8px; margin: 0; box-sizing: border-box;">
+                </div>
+                <button onclick="addNewNurse()" class="btn-submit" style="width: 100%; padding: 14px; font-size: 15px;">➕ Registra e Attiva</button>
+            </div>
+        </div>
+        <div style="padding: 16px 24px 24px; display:flex; gap:10px; border-top: 1px solid var(--glass-border); background: rgba(13,11,24,0.5);">
+            <button onclick="closeManageNursesModal()" class="btn-modal-cancel" style="flex:1; padding:14px; font-size: 15px;">✅ Completa e Chiudi</button>
+        </div>
+    </div>
+</div>
+<!-- QUICK ACTIONS MENU (LONG PRESS) -->
+<div id="quickActionOverlay" class="qa-overlay hidden" onclick="closeQuickAction()"></div>
+<div id="quickActionMenu" class="qa-menu hidden">
+    <div class="qa-header">
+        <span id="qaTitle">Azioni Rapide</span>
+        <button onclick="closeQuickAction()" class="btn-cls-sm">✕</button>
+    </div>
+    <div class="qa-body">
+        <button onclick="qaDeleteShift()" class="qa-btn qa-danger">🗑 Elimina Turno</button>
+        <div class="qa-divider"></div>
+        <div class="qa-lbl">Modifica in:</div>
+        <div class="qa-shift-list" id="qaShiftList"></div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script src="app.js?v=3.3"></script>
+</body>
+</html>
