@@ -690,7 +690,7 @@ function addOccurrence() {
     }
 
     // Ao invés de jogar direto em occurrences, colocamos em requests pendentes (Workflow B)
-    requests.push({ 
+    const newReq = { 
         id: generateId(), 
         type: type, // 'FE', 'OFF', 'OFF_INJ', 'AT'
         status: 'pending',
@@ -701,7 +701,8 @@ function addOccurrence() {
         desc,
         attachment: currentAttachedFile,
         createdAt: new Date().toISOString()
-    });
+    };
+    requests.push(newReq);
     
     document.getElementById('occNurse').value = '';
     document.getElementById('occStart').value = '';
@@ -709,10 +710,12 @@ function addOccurrence() {
     document.getElementById('occDesc').value = '';
     resetAttachment();
     
+    toggleRhForm();
     saveData();
     renderRequests();
     updateBadge();
     toast('⏳ Richiesta INVIATA. In attesa di Approvazione nella lista!', 'info');
+    appendRequestToCloud(newReq);
 }
 
 function removeOccurrence(id) {
@@ -848,9 +851,59 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
             const prev2 = day > 2 ? getSh(simObj, nId, day - 2) : null;
             if (prev2 && !['OFF', 'FE', 'AT'].includes(prev2)) return false; 
         }
-        
         return true;
     }
+
+    // ── AGREGADOR DE BLOQUEIOS E AUSÊNCIAS (COMPUTADO APENAS 1 VEZ) ──
+    const preAssignedShifts = []; 
+    
+    // 1) Occurrences (Módulo Legado)
+    occurrences.forEach(occ => {
+        const sDate = new Date(occ.start + 'T00:00:00');
+        const eDate = new Date(occ.end + 'T00:00:00');
+        for (let d = startDay; d <= simDays; d++) {
+            const checkDate = new Date(y, m, d);
+            checkDate.setHours(0,0,0,0); sDate.setHours(0,0,0,0); eDate.setHours(0,0,0,0);
+            if (checkDate >= sDate && checkDate <= eDate) {
+                preAssignedShifts.push({ nurseId: occ.nurseId, day: d, code: occ.type });
+            }
+        }
+    });
+
+    // 2) Requisições Aprovadas (Módulo Principal da Tabela de RH)
+    requests.forEach(req => {
+        if (req.status !== 'approved') return;
+        if (['FE', 'OFF', 'AT', 'OFF_INJ', 'vacation', 'justified', 'unexcused'].includes(req.type)) {
+            let startStr = req.startDate || req.date;
+            let endStr = req.endDate || startStr;
+            if (!startStr && req.day) {
+                const tempD = new Date(y, m, req.day);
+                startStr = tempD.toISOString().split('T')[0];
+                endStr = startStr;
+            }
+            if (startStr && endStr) {
+                const sDate = new Date(startStr + 'T00:00:00');
+                const eDate = new Date(endStr + 'T00:00:00');
+                // Traduções de domínios visuais para códigos matriz da engrenagem de geração
+                let code = ['AT','FE'].includes(req.type) ? req.type : (req.type === 'vacation' ? 'FE' : 'OFF');
+                for (let d = startDay; d <= simDays; d++) {
+                    const checkDate = new Date(y, m, d);
+                    checkDate.setHours(0,0,0,0); sDate.setHours(0,0,0,0); eDate.setHours(0,0,0,0);
+                    if (checkDate >= sDate && checkDate <= eDate) {
+                        preAssignedShifts.push({ nurseId: req.nurseId, day: d, code: code });
+                    }
+                }
+            }
+        } else if (req.type === 'swap') {
+            // Garante que o gerador não sobreescreva trocas manuais que já foram aprovadas neste mês!
+            if (req.fromDay >= startDay && req.fromDay <= simDays) {
+                preAssignedShifts.push({ nurseId: req.fromNurseId, day: req.fromDay, code: req.toShift });
+            }
+            if (req.toDay >= startDay && req.toDay <= simDays) {
+                preAssignedShifts.push({ nurseId: req.toNurseId, day: req.toDay, code: req.fromShift });
+            }
+        }
+    });
 
     // SIMULADOR 1 EPOCH DE SOLUÇÃO DA ESCALA
     function simulateOneScale() {
@@ -872,17 +925,9 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
             });
         }
 
-        // 1. Pré-carga (Férias/Ausências) - Afeta apenas novos dias ou sobrepõe passado se exigido (mas o passado do UI já estava setado)
-        occurrences.forEach(occ => {
-            const sDate = new Date(occ.start + 'T00:00:00');
-            const eDate = new Date(occ.end + 'T00:00:00');
-            for (let d = startDay; d <= simDays; d++) {
-                const checkDate = new Date(y, m, d);
-                checkDate.setHours(0,0,0,0); sDate.setHours(0,0,0,0); eDate.setHours(0,0,0,0);
-                if (checkDate >= sDate && checkDate <= eDate) {
-                    setSh(tSched, occ.nurseId, d, occ.type);
-                }
-            }
+        // 1. Pré-carga (Férias/Ausências e Requisições Aprovadas)
+        preAssignedShifts.forEach(item => {
+            setSh(tSched, item.nurseId, item.day, item.code);
         });
 
         const nightCount = {}; NURSES.forEach(n => nightCount[n.id]=0);
@@ -1643,7 +1688,7 @@ function renderRequests() {
     populateReqFilterNurse();
     const content = document.getElementById('requestsContent');
     if (!requests.length) {
-        content.innerHTML = `<div class="empty-state"><div class="empty-icon">📄</div><p>Nessuna richiesta ancora</p></div>`;
+        content.innerHTML = `<div class="empty-state" style="grid-column: 1/-1"><div class="empty-icon">📄</div><p>Nessuna richiesta ancora</p></div>`;
         return;
     }
 
@@ -1667,7 +1712,7 @@ function renderRequests() {
     });
 
     if (filtered.length === 0) {
-        content.innerHTML = `<div class="empty-state" style="padding:30px"><div class="empty-icon">🔍</div><p>Nessuna richiesta corrispondente ai filtri</p></div>`;
+        content.innerHTML = `<div class="empty-state" style="grid-column: 1/-1"><div class="empty-icon">🔍</div><p>Nessuna richiesta corrispondente ai filtri</p></div>`;
         return;
     }
 
@@ -1683,34 +1728,93 @@ function renderRequests() {
                         'FE': '🏖️ Ferie Programmate', 'OFF': '📋 Riposo', 'OFF_INJ': '⚠️ Assenza Ingiustificata', 'AT':'🏥 Certificato/Licenza' };
     const statusLabels = { pending:'⏳ In attesa', approved:'✅ Approvato', rejected:'❌ Rifiutato' };
 
-    content.innerHTML = `<div style="display:flex; flex-direction:column; gap:12px;">${sorted.map(req => {
+    const cols = {
+        pending: sorted.filter(r => r.status === 'pending'),
+        approved: sorted.filter(r => r.status === 'approved'),
+        rejected: sorted.filter(r => r.status === 'rejected')
+    };
+
+    const mapCard = (req) => {
         const canDelete = isCoordinator || (req.nurseId===currentUser.id||req.fromNurseId===currentUser.id);
         const canApprove = isCoordinator && req.status === 'pending';
-        
         let waitingHtml = '';
         if (req.status === 'pending') {
             const diff = Math.floor((new Date() - new Date(req.createdAt)) / (1000*60*60*24));
-            waitingHtml = `<div class="req-waiting">⏱️ Da ${diff === 0 ? 'meno di 1 giorno' : diff + ' giorn' + (diff>1?'i':'o')}</div>`;
+            waitingHtml = `<div class="req-waiting" style="margin-bottom:8px">⏱️ Da ${diff === 0 ? 'meno di 1 giorno' : diff + ' giorn' + (diff>1?'i':'o')}</div>`;
         }
-
-        return `<div class="req-card status-${req.status}" style="margin-bottom: 2px;">
+        return `<div class="req-card status-${req.status} collapsed" id="req-card-${req.id}">
             <div class="req-card-top">
                 <div class="req-card-type">${typeLabels[req.type]||req.type}</div>
                 <div class="req-card-status status-pill-${req.status}">${statusLabels[req.status]||req.status}</div>
             </div>
-            <div class="req-card-details">
-                ${getReqDetails(req)}
+            <div class="req-card-details-wrap">
+                <div class="req-card-details">
+                    ${getReqDetails(req)}
+                </div>
+                ${waitingHtml}
+                <div class="req-card-actions">
+                    ${canApprove ? `<button class="req-action-btn btn-approve" onclick="approveRequest('${req.id}')">✅ Approva</button><button class="req-action-btn btn-reject" onclick="rejectRequest('${req.id}')">❌ Rifiuta</button>` : ''}
+                    ${canDelete ? `<button class="req-action-btn" style="background:rgba(239,68,68,0.08); color:#f87171; border:1px solid rgba(239,68,68,0.2);" onclick="deleteRequest('${req.id}')">🗑 Elimina</button>` : ''}
+                </div>
             </div>
-            ${waitingHtml}
-            <div class="req-card-actions">
-                ${canApprove ? `
-                    <button class="req-action-btn btn-approve" onclick="approveRequest('${req.id}')">✅ Approva</button>
-                    <button class="req-action-btn btn-reject" onclick="rejectRequest('${req.id}')">❌ Rifiuta</button>
-                ` : ''}
-                ${canDelete ? `<button class="req-action-btn" style="background:rgba(239,68,68,0.08); color:#f87171; border:1px solid rgba(239,68,68,0.2);" onclick="deleteRequest('${req.id}')">🗑 Elimina</button>` : ''}
-            </div>
+            <button class="req-action-toggle" onclick="toggleReqCard('${req.id}')"><span>▼</span></button>
         </div>`;
-    }).join('')}</div>`;
+    };
+
+    let html = '';
+    if (reqStatusFilter === 'all' || reqStatusFilter === 'pending') {
+        html += `<div class="requests-col">
+            <div class="requests-col-title"><span style="color:var(--warning)">⏳</span> In Attesa</div>
+            ${cols.pending.map(mapCard).join('')}
+        </div>`;
+    }
+    if (reqStatusFilter === 'all' || reqStatusFilter === 'approved') {
+        html += `<div class="requests-col">
+            <div class="requests-col-title"><span style="color:var(--success)">✅</span> Approvati</div>
+            ${cols.approved.map(mapCard).join('')}
+        </div>`;
+    }
+    if (reqStatusFilter === 'all' || reqStatusFilter === 'rejected') {
+        html += `<div class="requests-col">
+            <div class="requests-col-title"><span style="color:var(--danger)">❌</span> Rifiutati</div>
+            ${cols.rejected.map(mapCard).join('')}
+        </div>`;
+    }
+
+    content.innerHTML = html;
+}
+
+function toggleReqCard(id) {
+    const card = document.getElementById(`req-card-${id}`);
+    if (card) {
+        card.classList.toggle('collapsed');
+    }
+}
+
+// ── AUTO-SYNC (Append Nuova Richiesta al Cloud) ──
+async function appendRequestToCloud(req) {
+    if (!GOOGLE_API_URL) return;
+    try {
+        const reqRow = {
+            id: String(req.id), type: req.type, status: req.status,
+            nurseId: req.nurseId || req.fromNurseId || '', nurseName: req.nurseName || req.fromNurseName || '',
+            startDate: req.startDate || req.date || '', endDate: req.endDate || req.startDate || req.date || '',
+            desc: req.desc || req.reason || '', createdAt: req.createdAt || '', approvedAt: '', approvedBy: ''
+        };
+        const updUrl = `${GOOGLE_API_URL}?action=update&sheetName=Solicitacoes&apiKey=${API_KEY}`;
+        // Envia as propriedades completas para usar o behavior do Google Sheet AppScript de inserir
+        // a linha caso o ID seja ausente. (Polymorfismo de update/insert)
+        await fetch(updUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+                _keyColumn: 'id', _keyValue: String(req.id), ...reqRow
+            })
+        });
+        console.log('[SYNC] Nuova request pub nell\'oracolo in cloud:', req.id);
+    } catch (e) {
+        console.warn('[SYNC] Errore publ:', e);
+    }
 }
 
 function getReqDetails(req) {

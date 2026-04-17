@@ -176,7 +176,7 @@
             <div class="rh-widescreen-layout">
                 <!-- Painel Expansível: Formulário -->
                 <div id="rhFormContainer" class="hidden" style="margin-bottom: 32px; animation: fadeIn 0.2s ease-out;">
-                <div class="rh-card rh-form-panel" style="padding: 32px 28px;">
+                <div class="rh-card rh-form-panel" style="padding: 32px 28px; max-width: 600px; margin: 0 auto;">
                     <h3 style="margin-bottom: 24px; color: var(--text); font-size: 20px; font-weight: 800; display:flex; align-items:center; gap:8px;">
                         <span style="font-size: 24px;">➕</span> Inserisci Nuovo Record
                     </h3>
@@ -246,44 +246,32 @@
                 </div>
             </div>
                 
-            <!-- Occorrenze + Richieste side by side -->
-            <div class="rh-panels-grid">
-                    <div class="rh-panel-section">
-                        <h3 class="rh-section-title">
-                            <span>📚</span> Registro Occorrenze
-                        </h3>
-                        <div id="occTableBody" class="rh-cards-container">
-                        </div>
+            <!-- Requests Pane -->
+            <div class="rh-panel-section" style="padding: 0; background: transparent; border: none; box-shadow: none;">
+                <!-- Filters Bar (Sticky) -->
+                <div class="req-filters-bar" id="reqFiltersBar" style="position: sticky; top: 0; z-index: 100; background: var(--bg-surface); margin-bottom: 24px;">
+                    <div class="req-filter-chips">
+                        <button class="req-filter-chip active" data-filter="all" onclick="setReqStatusFilter('all', this)">Tutti</button>
+                        <button class="req-filter-chip" data-filter="pending" onclick="setReqStatusFilter('pending', this)">⏳ In attesa</button>
+                        <button class="req-filter-chip" data-filter="approved" onclick="setReqStatusFilter('approved', this)">✅ Approvati</button>
+                        <button class="req-filter-chip" data-filter="rejected" onclick="setReqStatusFilter('rejected', this)">❌ Rifiutati</button>
                     </div>
-                    
-                    <div class="rh-panel-section">
-                        <h3 class="rh-section-title">
-                            <span>🔔</span> Richieste delle Infermiere
-                        </h3>
-                        <!-- Filters Bar -->
-                        <div class="req-filters-bar" id="reqFiltersBar">
-                            <div class="req-filter-chips">
-                                <button class="req-filter-chip active" data-filter="all" onclick="setReqStatusFilter('all', this)">Tutti</button>
-                                <button class="req-filter-chip" data-filter="pending" onclick="setReqStatusFilter('pending', this)">⏳ In attesa</button>
-                                <button class="req-filter-chip" data-filter="approved" onclick="setReqStatusFilter('approved', this)">✅ Approvati</button>
-                                <button class="req-filter-chip" data-filter="rejected" onclick="setReqStatusFilter('rejected', this)">❌ Rifiutati</button>
-                            </div>
-                            <div class="req-filter-selects">
-                                <select id="reqFilterNurse" class="req-filter-select" onchange="applyReqFilters()">
-                                    <option value="all">👤 Tutti i dipendenti</option>
-                                </select>
-                                <input type="date" id="reqFilterFrom" class="req-filter-date" onchange="applyReqFilters()" title="Da">
-                                <input type="date" id="reqFilterTo" class="req-filter-date" onchange="applyReqFilters()" title="A">
-                            </div>
-                        </div>
-                        <div id="requestsContent" class="rh-cards-container">
-                            <div class="empty-state" style="padding: 40px 20px;">
-                                <div class="empty-icon">📄</div>
-                                <p>Nessuna nuova richiesta per ora</p>
-                            </div>
-                        </div>
+                    <div class="req-filter-selects">
+                        <select id="reqFilterNurse" class="req-filter-select" onchange="applyReqFilters()">
+                            <option value="all">👤 Tutti i dipendenti</option>
+                        </select>
+                        <input type="date" id="reqFilterFrom" class="req-filter-date" onchange="applyReqFilters()" title="Da">
+                        <input type="date" id="reqFilterTo" class="req-filter-date" onchange="applyReqFilters()" title="A">
                     </div>
                 </div>
+                <!-- Vazio aguardando app.js renderiza-lo em 3 colunas -->
+                <div id="requestsContent" class="rh-requests-container">
+                    <div class="empty-state" style="padding: 40px 20px;">
+                        <div class="empty-icon">📄</div>
+                        <p>Nessuna nuova richiesta per ora</p>
+                    </div>
+                </div>
+            </div>
             </div>
         </div>
     </div>

@@ -774,13 +774,33 @@ html, body {
 
 /* ── REQ CARDS (Central RH) — Enhanced ──────────── */
 .req-list { display: flex; flex-direction: column; gap: 12px; }
+
+.rh-requests-container {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    align-items: start;
+    padding-bottom: 40px;
+}
+.requests-col { display: flex; flex-direction: column; gap: 12px; }
+.requests-col-title {
+    font-size: 14px; font-weight: 800; color: var(--text-2);
+    margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 2px solid var(--glass-border); padding-bottom: 12px;
+}
+
+@media (max-width: 960px) {
+    .rh-requests-container { grid-template-columns: 1fr; }
+}
+
 .req-card {
   background: rgba(255,255,255,0.04);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
   border-radius: 14px;
-  padding: 18px 20px; transition: all 0.2s;
+  padding: 18px 20px 8px 20px; transition: all 0.2s;
   animation: cardIn 0.3s ease-out;
   border-left: 4px solid var(--glass-border);
 }
@@ -810,6 +830,20 @@ html, body {
 .status-pill-pending  { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.25); }
 .status-pill-approved { background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.25); }
 .status-pill-rejected { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
+
+/* Card Expansion Logic */
+.req-card-details-wrap {
+    overflow: hidden; transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+    max-height: 500px; opacity: 1; padding-bottom: 10px;
+}
+.req-card.collapsed .req-card-details-wrap { max-height: 0; opacity: 0; padding-bottom: 0; }
+.req-action-toggle {
+    width: 100%; padding: 8px; background: transparent; border: none; color: var(--text-3); font-size: 12px; font-weight: 700; cursor: pointer; border-top: 1px solid rgba(255,255,255,0.05); transition: color 0.2s; display: flex; justify-content: center;
+}
+.req-action-toggle:hover { color: var(--text); }
+.req-action-toggle span { display: inline-block; transition: transform 0.3s ease; }
+.req-card.collapsed .req-action-toggle span { transform: rotate(180deg); }
+
 
 .req-card-details { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .req-detail-row {
