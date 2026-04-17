@@ -181,7 +181,7 @@ async function publishToCloud() {
 
         // 2. Publicar Escala do mês atual (limpa o mês e regrava)
         const escalaRows = displayNurses.map(nurse => {
-            const row = { nurseId: nurse.id, month: String(m), year: String(y) };
+            const row = { nurseId: nurse.id, month: String(m + 1), year: String(y) };
             for (let d = 1; d <= 31; d++) {
                 row['d' + d] = d <= days ? getShift(nurse.id, d) : '';
             }
@@ -193,7 +193,7 @@ async function publishToCloud() {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
             body: JSON.stringify({
-                clearFilter: { column: 'month', value: String(m) },
+                clearFilter: { column: 'month', value: String(m + 1) },
                 rows: escalaRows
             })
         });
@@ -265,16 +265,27 @@ function initApp() {
             renderOccurrences();
             renderRequests();
             
-            // TESTE DE CONEXÃO COM A NUVEM
+            // TESTE DE CONEXÃO COM A NUVEM E SINCPRONIZAÇÃO INICIAL
             setTimeout(async () => {
                 const dbTest = await fetchGoogleDB('read', 'Funcionarios');
+                const pDot = document.getElementById('cloudStatusDot');
+                const pTxt = document.getElementById('cloudStatusText');
+                
                 if (dbTest && dbTest.status === 'success') {
-                    toast('🟢 Connesso al Cloud Database (Google Sheets)', 'success', 4000);
-                    console.log("[CLOUD DB] Resposta:", dbTest.data);
+                    if (pDot) pDot.style.background = 'var(--success)';
+                    if (pTxt) { pTxt.textContent = 'App Sincronizzato'; pTxt.style.color = 'var(--text)'; }
+                    
+                    toast('🟢 Sistema Online connesso al Database cloud!', 'success', 3500);
+                    
+                    // Dispara a sincronização de turnos pendentes presentes na Nuvem
+                    await syncScheduleFromCloud();
                 } else {
+                    if (pDot) pDot.style.background = 'var(--danger)';
+                    if (pTxt) { pTxt.textContent = 'Offline (Errore)'; pTxt.style.color = '#fff'; }
                     console.warn("[CLOUD DB] Falha no teste inicial:", dbTest);
+                    toast('🔴 Modalità offline attiva. Connessione persa.', 'warning', 5000);
                 }
-            }, 500);
+            }, 600);
 
         }, 500); 
     }, 2200); 
@@ -360,12 +371,52 @@ async function syncRequestsFromCloud() {
     }
 }
 
-// ── MONTH NAV ─────────────────────────────────────────────────
+// ── MONTH NAV E CLOUD DOWNLOAD AUTOMÁTICO ─────────────────
 function changeMonth(d) {
     currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth()+d, 1);
     updateMonthDisplay();
     renderCalendar();
+    
+    // Auto-syncroniza quando a coordenadora visualiza um mês:
+    syncScheduleFromCloud();
 }
+
+async function syncScheduleFromCloud() {
+    try {
+        const pTxt = document.getElementById('cloudStatusText');
+        if(pTxt) pTxt.textContent = 'Sincronizzando...';
+        
+        const m = currentMonth.getMonth(); // 0 a 11 base JS
+        const y = currentMonth.getFullYear();
+
+        const dbRes = await fetchGoogleDB('read', 'Escala');
+        if (dbRes && dbRes.status === 'success' && dbRes.data) {
+            let loaded = 0;
+            const sheetMonthValue = String(m + 1); // 1 a 12 base Sheets Visual
+            
+            dbRes.data.forEach(row => {
+                if (String(row.month) === sheetMonthValue && String(row.year) === String(y)) {
+                    for (let d = 1; d <= 31; d++) {
+                        let shiftCode = row['d' + d];
+                        if (shiftCode) {
+                            schedule[`${row.nurseId}_${m}_${y}_${d}`] = shiftCode;
+                            loaded++;
+                        }
+                    }
+                }
+            });
+            if (loaded > 0) {
+                saveData();
+                renderCalendar();
+                toast(`☁️ Turni del mese scaricati in base al cloud!`, 'info', 2000);
+            }
+            if(pTxt) pTxt.textContent = 'App Sincronizzato';
+        }
+    } catch (e) {
+        console.error("Errore download turni", e);
+    }
+}
+
 
 function updateMonthDisplay() {
     const months = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
