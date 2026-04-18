@@ -272,13 +272,68 @@ function initApp() {
                 const pTxt = document.getElementById('cloudStatusText');
                 
                 if (dbTest && dbTest.status === 'success') {
+                    if (dbTest.data && dbTest.data.length > 0) {
+                        try {
+                            let mergedNurses = false;
+                            dbTest.data.forEach(cn => {
+                                const id = String(cn.ID_Funcionario || cn.id || '');
+                                const name = String(cn.Nome || cn.name || '');
+                                const quota = parseInt(cn.Carga_Horaria_Mensal || cn.nightQuota) || 5;
+                                if (!id || id === 'undefined' || !name || name === 'undefined') return;
+                                
+                                const localNurse = NURSES.find(n => String(n.id) === id);
+                                if (!localNurse) {
+                                    NURSES.push({
+                                        id: id,
+                                        name: name,
+                                        initials: name.split(' ').map(w => w[0] || '').join('').substring(0,2).toUpperCase(),
+                                        nightQuota: quota
+                                    });
+                                    let targetVal = currentMonth.getFullYear() * 12 + currentMonth.getMonth();
+                                    for (let mo in monthlyOrder) {
+                                        let [mStr, yStr] = mo.split('_');
+                                        let val = parseInt(yStr) * 12 + parseInt(mStr);
+                                        if (val >= targetVal) {
+                                            if (!monthlyOrder[mo].includes(id)) {
+                                                monthlyOrder[mo].push(id);
+                                            }
+                                        }
+                                    }
+                                    let currK = `${currentMonth.getMonth()}_${currentMonth.getFullYear()}`;
+                                    if (!monthlyOrder[currK]) {
+                                        monthlyOrder[currK] = NURSES.map(n => n.id);
+                                    } else if (!monthlyOrder[currK].includes(id)) {
+                                        monthlyOrder[currK].push(id);
+                                    }
+                                    mergedNurses = true;
+                                } else {
+                                    // Atualiza dados alterados
+                                    if(localNurse.name !== name || localNurse.nightQuota !== quota){
+                                        localNurse.name = name;
+                                        localNurse.initials = name.split(' ').map(w => w[0] || '').join('').substring(0,2).toUpperCase();
+                                        localNurse.nightQuota = quota;
+                                        mergedNurses = true;
+                                    }
+                                }
+                            });
+                            if (mergedNurses) {
+                                saveData();
+                                renderCalendar();
+                                populateOccNurses();
+                            }
+                        } catch(e) { console.error('Erro na sincronização de funcionários:', e); }
+                    }
+
                     if (pDot) pDot.style.background = 'var(--success)';
                     if (pTxt) { pTxt.textContent = 'App Sincronizzato'; pTxt.style.color = 'var(--text)'; }
                     
                     toast('🟢 Sistema Online connesso al Database cloud!', 'success', 3500);
                     
-                    // Dispara a sincronização de turnos pendentes presentes na Nuvem
+                    // Dispara a sincronização de turnos pendentes e requisições
                     await syncScheduleFromCloud();
+                    await syncRequestsFromCloud();
+                    renderRequests();
+                    renderOccurrences();
                 } else {
                     if (pDot) pDot.style.background = 'var(--danger)';
                     if (pTxt) { pTxt.textContent = 'Offline (Errore)'; pTxt.style.color = '#fff'; }
@@ -324,14 +379,28 @@ function showTab(tab, btn) {
 async function syncRequestsFromCloud() {
     try {
         const cloudResult = await fetchGoogleDB('read', 'Solicitacoes');
-        if (cloudResult && cloudResult.status === 'success' && cloudResult.data && cloudResult.data.length > 0) {
+        if (cloudResult && cloudResult.status === 'success' && cloudResult.data) {
             const cloudRequests = cloudResult.data;
-            // Merge: adicionar ao local qualquer request da nuvem que não exista localmente
-            let merged = false;
+            const cloudIds = new Set(cloudRequests.map(cr => String(cr.id)));
+            
+            let updatedRequests = [];
+            let isModified = false;
+            
+            // 1. Process cloud requests (update existing, add new)
             cloudRequests.forEach(cr => {
                 const crId = String(cr.id);
-                if (!requests.find(r => String(r.id) === crId)) {
-                    requests.push({
+                const local = requests.find(r => String(r.id) === crId);
+                
+                if (local) {
+                    if (local.status !== cr.status) {
+                        local.status = cr.status;
+                        local.approvedAt = cr.approvedAt || local.approvedAt;
+                        local.approvedBy = cr.approvedBy || local.approvedBy;
+                        isModified = true;
+                    }
+                    updatedRequests.push(local);
+                } else {
+                    updatedRequests.push({
                         id: crId,
                         type: cr.type || 'OFF',
                         status: cr.status || 'pending',
@@ -348,22 +417,20 @@ async function syncRequestsFromCloud() {
                         approvedAt: cr.approvedAt || '',
                         approvedBy: cr.approvedBy || ''
                     });
-                    merged = true;
-                } else {
-                    // Atualizar status se mudou na nuvem (ex: aprovado pelo mobile)
-                    const local = requests.find(r => String(r.id) === crId);
-                    if (local && cr.status !== local.status) {
-                        local.status = cr.status;
-                        local.approvedAt = cr.approvedAt || local.approvedAt;
-                        local.approvedBy = cr.approvedBy || local.approvedBy;
-                        merged = true;
-                    }
+                    isModified = true;
                 }
             });
-            if (merged) {
+            
+            // 2. Check if we need to drop any local requests that no longer exist in cloud
+            if (requests.length !== updatedRequests.length) {
+                isModified = true;
+            }
+            
+            if (isModified) {
+                requests = updatedRequests; // Replace entirely to drop ghost requests
                 saveData();
                 updateBadge();
-                toast('☁️ Richieste sincronizzate dal cloud', 'info');
+                toast('☁️ Richieste sincronizzate e allineate col cloud', 'info');
             }
         }
     } catch (e) {
@@ -1321,6 +1388,15 @@ function exportSchedule() {
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;margin:0;border-width:2px;display:inline-block;"></span>...';
     btn.style.pointerEvents = 'none';
 
+    const loading = document.getElementById('loadingOverlay');
+    if (loading) {
+        const txt = loading.querySelector('.loading-txt');
+        const sub = loading.querySelector('.loading-sub');
+        if (txt) txt.textContent = "Generazione PDF...";
+        if (sub) sub.textContent = "Attendere prego";
+        loading.classList.remove('hidden');
+    }
+
     // Clone the element to render perfectly without UI constraints
     const originalTab = document.getElementById('calendarTab');
     const clone = originalTab.cloneNode(true);
@@ -1329,11 +1405,11 @@ function exportSchedule() {
     clone.id = 'calendarTab-pdf';
     clone.style.position = 'absolute';
     clone.style.top = '0';
-    clone.style.left = '-9999px';
+    clone.style.left = '0';
     clone.style.width = '1400px'; 
-    clone.style.height = 'auto';
+    clone.style.minHeight = '100vh';
     clone.style.backgroundColor = '#ffffff';
-    clone.style.zIndex = '-9999';
+    clone.style.zIndex = '9000'; // Shows right behind the loading overlay (9990)
     clone.style.display = 'block';
 
     // Hide toolbar in clone
@@ -1381,29 +1457,40 @@ function exportSchedule() {
     const opt = {
         margin:       [10, 10, 10, 10],
         filename:     `Escala_Cotolengo_${monthName}_${year}.pdf`,
-        image:        { type: 'jpeg', quality: 1.0 },
-        html2canvas:  { scale: 2.5, useCORS: true, logging: false, windowWidth: 1440, backgroundColor: '#ffffff' },
+        image:        { type: 'jpeg', quality: 0.98 },
+        html2canvas:  { scale: 2, useCORS: true, logging: false, windowWidth: 1440, backgroundColor: '#ffffff' },
         jsPDF:        { unit: 'mm', format: 'a3', orientation: 'landscape' }
     };
 
     setTimeout(() => {
+        window.scrollTo(0, 0); // Force scroll top
         html2pdf().set(opt).from(clone).save().then(() => {
-            clone.remove();
-            const tmpStyle = document.getElementById('pdf-temp-style');
-            if (tmpStyle) tmpStyle.remove();
-            btn.innerHTML = '⬇ Esporta PDF';
-            btn.style.pointerEvents = '';
+            cleanupPdfExport(clone, btn, loading);
             toast('PDF scaricato!', 'success');
         }).catch(err => {
-            clone.remove();
-            const tmpStyle = document.getElementById('pdf-temp-style');
-            if (tmpStyle) tmpStyle.remove();
-            btn.innerHTML = '⬇ Esporta PDF';
-            btn.style.pointerEvents = '';
+            cleanupPdfExport(clone, btn, loading);
             toast('Errore esportazione', 'error');
             console.error(err);
         });
-    }, 300);
+    }, 500); // Give 500ms for the browser to render the table natively before capturing
+}
+
+function cleanupPdfExport(clone, btn, loading) {
+    if (clone) clone.remove();
+    const tmpStyle = document.getElementById('pdf-temp-style');
+    if (tmpStyle) tmpStyle.remove();
+    if (btn) {
+        btn.innerHTML = '⬇ Esporta';
+        btn.style.pointerEvents = '';
+    }
+    if (loading) {
+        loading.classList.add('hidden');
+        // Reset loading text to default for AI generation
+        const txt = loading.querySelector('.loading-txt');
+        const sub = loading.querySelector('.loading-sub');
+        if (txt) txt.textContent = "Generazione turni intelligenti...";
+        if (sub) sub.textContent = "Applicazione regole aziendali";
+    }
 }
 
 // ── DAY MODAL (UNIFIED) ───────────────────────────────────────
