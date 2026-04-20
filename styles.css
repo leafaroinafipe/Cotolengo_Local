@@ -56,6 +56,44 @@
     --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
+/* ── PENDING CARD (top notification) ────── */
+.pending-card {
+    position: absolute;
+    top: 72px;
+    right: 24px;
+    z-index: 100;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--danger);
+    padding: 8px 14px;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: transform 0.2s;
+    display: flex;
+}
+.pending-card.hidden-card { display: none; }
+
+/* ── ACCESSIBILITY: Reduced Motion ──────── */
+@media (prefers-reduced-motion: reduce) {
+    .main-bg .orb, .splash-bg .orb, .splash-logo { animation: none !important; }
+    .screen { transition: none !important; }
+    .tab-pane { animation: none !important; }
+    * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+/* ── SAFARI / MAC COMPATIBILITY ─────────── */
+/* Safari requer -webkit-overflow-scrolling para scroll suave */
+.cal-scroll, .tab-pane, .modal-body {
+    -webkit-overflow-scrolling: touch;
+}
+/* Safari: sticky fallback quando position:sticky não é suportado */
+@supports not (position: sticky) {
+    .nurse-cell, .cal-table th { position: static !important; }
+}
+
 html, body {
     height: 100%;
     font-family: var(--font);
@@ -64,6 +102,7 @@ html, body {
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
 }
+
 
 /* ── ORBS (BACKGROUND) ──────────────────── */
 .main-bg { position: absolute; inset: 0; overflow: hidden; z-index: -1; }

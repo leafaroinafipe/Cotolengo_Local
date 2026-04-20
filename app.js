@@ -90,7 +90,12 @@ function getMonthlyNurses() {
 }
 
 // ── PERSISTENCE ───────────────────────────────────────────────
+let _saveTimer = null;
 function saveData() {
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(_doSave, 500);
+}
+function _doSave() {
     localStorage.setItem('escala_nurses', JSON.stringify(NURSES));
     localStorage.setItem('escala_schedule', JSON.stringify(schedule));
     localStorage.setItem('escala_occurrences', JSON.stringify(occurrences));
@@ -116,27 +121,37 @@ function loadData() {
 // ── GOOGLE SHEETS API (CLOUD DB) ──────────────────────────────
 async function fetchGoogleDB(action, sheetName, dataObject = null) {
     if (!GOOGLE_API_URL) {
-        // Fallback silencioso (modo offline) se a URL não estiver configurada no topo do arquivo.
         console.info('Aviso: Operando apenas no Banco Local (Localstorage). URL da Nuvem não fornecida no app.js.');
         return null;
     }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout
     try {
         if (action === 'read') {
             const url = `${GOOGLE_API_URL}?action=${action}&sheetName=${sheetName}&apiKey=${API_KEY}`;
-            const response = await fetch(url);
+            const response = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
             return await response.json();
         } else if (action === 'write') {
             const url = `${GOOGLE_API_URL}?action=${action}&sheetName=${sheetName}&apiKey=${API_KEY}`;
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Evita CORS Preflight
-                body: JSON.stringify(dataObject || {})
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify(dataObject || {}),
+                signal: controller.signal
             });
+            clearTimeout(timeoutId);
             return await response.json();
         }
     } catch (error) {
-        console.error("Erro na comunicação com a Base Google:", error);
-        toast('Conexão instável com Banco Nuvem.', 'warning');
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+            console.warn("Timeout na comunicação com a Base Google — modo offline ativado.");
+            toast('Tempo limite excedido. Modo offline ativo.', 'warning');
+        } else {
+            console.error("Erro na comunicação com a Base Google:", error);
+            toast('Conexão instável com Banco Nuvem.', 'warning');
+        }
         return null;
     }
 }
@@ -360,6 +375,7 @@ function buildLegend() {
 }
 
 // ── NAVIGATION ────────────────────────────────────────────────
+let _lastReqSync = 0;
 function showTab(tab, btn) {
     document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
     document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
@@ -367,11 +383,17 @@ function showTab(tab, btn) {
     btn.classList.add('active');
     if (tab==='reports') renderReports();
     if (tab==='requests') {
-        // Sincronizar solicitações da nuvem antes de renderizar
-        syncRequestsFromCloud().then(() => {
+        const now = Date.now();
+        if (now - _lastReqSync > 60000) { // só sincroniza se passaram mais de 60s
+            _lastReqSync = now;
+            syncRequestsFromCloud().then(() => {
+                renderRequests();
+                renderOccurrences();
+            });
+        } else {
             renderRequests();
             renderOccurrences();
-        });
+        }
     }
 }
 
@@ -1397,95 +1419,102 @@ function exportSchedule() {
         loading.classList.remove('hidden');
     }
 
-    // Clone the element to render perfectly without UI constraints
     const originalTab = document.getElementById('calendarTab');
     const clone = originalTab.cloneNode(true);
-    
-    // Setup clean container for rendering
     clone.id = 'calendarTab-pdf';
-    clone.style.position = 'absolute';
-    clone.style.top = '0';
-    clone.style.left = '0';
-    clone.style.width = '1400px'; 
-    clone.style.minHeight = '100vh';
-    clone.style.backgroundColor = '#ffffff';
-    clone.style.zIndex = '9000'; // Shows right behind the loading overlay (9990)
-    clone.style.display = 'block';
 
-    // Hide toolbar in clone
+    // Remove botões/toolbar do clone
     const tbar = clone.querySelector('.cal-toolbar');
     if (tbar) tbar.style.display = 'none';
 
-    // Reset scroll and fix sticky headers in clone
+    // Desfaz overflow e sticky para captura completa
     const cScroll = clone.querySelector('.cal-scroll');
-    if (cScroll) {
-        cScroll.style.overflow = 'visible';
-        cScroll.style.height = 'auto';
-    }
-    const stickies = clone.querySelectorAll('.cal-table th, .nurse-cell');
-    stickies.forEach(el => {
+    if (cScroll) { cScroll.style.overflow = 'visible'; cScroll.style.height = 'auto'; cScroll.style.maxHeight = 'none'; }
+    clone.querySelectorAll('.cal-table th, .nurse-cell').forEach(el => {
         el.style.position = 'static';
         el.style.transform = 'none';
     });
 
-    // Apply specific light-theme PDF styles that preserve shift colors
+    // Wrapper off-screen: evita que overflow:hidden do body corte o conteúdo
+    // Funciona em Chrome, Firefox e Safari (Mac + Windows)
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = [
+        'position:fixed',
+        'top:0',
+        'left:-99999px',
+        'width:1400px',
+        'background:#ffffff',
+        'overflow:visible',
+        'z-index:0',
+        'padding:20px'
+    ].join(';');
+    wrapper.appendChild(clone);
+    document.body.appendChild(wrapper);
+
+    // Estilos PDF (light theme, legível para impressão)
     const pdfStyle = document.createElement('style');
     pdfStyle.id = 'pdf-temp-style';
     pdfStyle.textContent = `
-        #calendarTab-pdf { color: #0f172a !important; padding: 20px; }
-        #calendarTab-pdf .cal-table { background: #ffffff !important; border: 1px solid #cbd5e1 !important; width: 100% !important; }
-        #calendarTab-pdf .cal-table th { background: #f8fafc !important; color: #334155 !important; font-weight: bold !important; border: 1px solid #cbd5e1 !important; }
-        #calendarTab-pdf .cal-table th.wkend { color: #b45309 !important; background: #fffbeb !important; }
-        #calendarTab-pdf .cal-table td { border: 1px solid #cbd5e1 !important; }
-        #calendarTab-pdf .nurse-cell { background: #f1f5f9 !important; color: #0f172a !important; font-weight: bold !important; }
-        #calendarTab-pdf .cal-summary-table-wrap { background: #ffffff; border: 1px solid #cbd5e1; }
-        #calendarTab-pdf .rpt-table th { background: #f8fafc !important; color: #334155 !important; }
-        #calendarTab-pdf .rpt-table td { color: #1e293b !important; border-bottom: 1px solid #cbd5e1 !important; }
-        #calendarTab-pdf .cal-summary-title { color: #0f172a !important; }
-        #calendarTab-pdf .shift-legend { background: transparent !important; border: none !important; margin-bottom: 20px; }
-        #calendarTab-pdf * { text-shadow: none !important; box-shadow: none !important; }
+        #calendarTab-pdf { color:#0f172a !important; background:#ffffff !important; }
+        #calendarTab-pdf .shift-legend { background:transparent !important; border:none !important; margin-bottom:16px; }
+        #calendarTab-pdf .legend-dot { border:1px solid rgba(0,0,0,.15) !important; }
+        #calendarTab-pdf .legend-item { color:#334155 !important; }
+        #calendarTab-pdf .cal-table { background:#ffffff !important; border:1px solid #cbd5e1 !important; width:100% !important; border-collapse:collapse !important; }
+        #calendarTab-pdf .cal-table th { background:#f8fafc !important; color:#334155 !important; font-weight:700 !important; border:1px solid #cbd5e1 !important; }
+        #calendarTab-pdf .cal-table th.wkend { color:#b45309 !important; background:#fffbeb !important; }
+        #calendarTab-pdf .cal-table td { border:1px solid #cbd5e1 !important; }
+        #calendarTab-pdf .nurse-cell { background:#f1f5f9 !important; color:#0f172a !important; font-weight:700 !important; white-space:nowrap; }
+        #calendarTab-pdf .cal-summary-section { display:block !important; }
+        #calendarTab-pdf .cal-summary-title { color:#0f172a !important; }
+        #calendarTab-pdf .rpt-table th { background:#f8fafc !important; color:#334155 !important; }
+        #calendarTab-pdf .rpt-table td { color:#1e293b !important; border-bottom:1px solid #cbd5e1 !important; }
+        #calendarTab-pdf * { text-shadow:none !important; box-shadow:none !important; }
     `;
     document.head.appendChild(pdfStyle);
-    document.body.appendChild(clone);
-    
-    // Restore text for missing SVGs/inputs if any, though schedule has none.
-    
+
     const months = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
     const monthName = months[currentMonth.getMonth()];
     const year = currentMonth.getFullYear();
 
     const opt = {
-        margin:       [10, 10, 10, 10],
-        filename:     `Escala_Cotolengo_${monthName}_${year}.pdf`,
-        image:        { type: 'jpeg', quality: 0.98 },
-        html2canvas:  { scale: 2, useCORS: true, logging: false, windowWidth: 1440, backgroundColor: '#ffffff' },
-        jsPDF:        { unit: 'mm', format: 'a3', orientation: 'landscape' }
+        margin:      [8, 6, 8, 6],
+        filename:    `Escala_Cotolengo_${monthName}_${year}.pdf`,
+        image:       { type: 'jpeg', quality: 0.95 },
+        html2canvas: {
+            scale: 1.8,
+            useCORS: true,
+            allowTaint: true,
+            logging: false,
+            backgroundColor: '#ffffff',
+            scrollX: 0,
+            scrollY: 0,
+            windowWidth: 1440
+        },
+        jsPDF: { unit: 'mm', format: 'a3', orientation: 'landscape' }
     };
 
+    // 800ms para o browser renderizar completamente o clone antes de capturar
     setTimeout(() => {
-        window.scrollTo(0, 0); // Force scroll top
-        html2pdf().set(opt).from(clone).save().then(() => {
-            cleanupPdfExport(clone, btn, loading);
-            toast('PDF scaricato!', 'success');
-        }).catch(err => {
-            cleanupPdfExport(clone, btn, loading);
-            toast('Errore esportazione', 'error');
-            console.error(err);
-        });
-    }, 500); // Give 500ms for the browser to render the table natively before capturing
+        html2pdf().set(opt).from(clone).save()
+            .then(() => {
+                _cleanupPdf(wrapper, btn, loading);
+                toast('PDF scaricato con successo!', 'success');
+            })
+            .catch(err => {
+                _cleanupPdf(wrapper, btn, loading);
+                toast('Errore durante l\'esportazione PDF.', 'error');
+                console.error('[PDF Export Error]', err);
+            });
+    }, 800);
 }
 
-function cleanupPdfExport(clone, btn, loading) {
-    if (clone) clone.remove();
+function _cleanupPdf(wrapper, btn, loading) {
+    if (wrapper && wrapper.parentNode) wrapper.remove();
     const tmpStyle = document.getElementById('pdf-temp-style');
     if (tmpStyle) tmpStyle.remove();
-    if (btn) {
-        btn.innerHTML = '⬇ Esporta';
-        btn.style.pointerEvents = '';
-    }
+    if (btn) { btn.innerHTML = '⬇ Esporta'; btn.style.pointerEvents = ''; }
     if (loading) {
         loading.classList.add('hidden');
-        // Reset loading text to default for AI generation
         const txt = loading.querySelector('.loading-txt');
         const sub = loading.querySelector('.loading-sub');
         if (txt) txt.textContent = "Generazione turni intelligenti...";
@@ -2084,7 +2113,13 @@ function updateBadge() {
     const topCard = document.getElementById('topPendingCard');
     const topText = document.getElementById('topPendingText');
     if (topCard && topText) {
-        topCard.style.display = isCoordinator ? 'flex' : 'none';
+        if (isCoordinator) {
+            topCard.classList.remove('hidden-card');
+            topCard.style.display = 'flex';
+        } else {
+            topCard.classList.add('hidden-card');
+            topCard.style.display = 'none';
+        }
         topText.textContent = pending;
         if (pending === 0) {
             topCard.style.borderLeft = '3px solid var(--success)';
@@ -2144,10 +2179,15 @@ function renderReports() {
 
 // ── INIT ──────────────────────────────────────────────────────
 // ── INIT E GERENCIAMENTO DE FUNCIONÁRIOS ──────────────────────
-document.addEventListener('DOMContentLoaded', ()=>{
+function bootstrap() {
     loadData(); 
     initApp();
-});
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrap);
+} else {
+    bootstrap();
+}
 
 function openManageNursesModal() {
     renderActiveNursesList();
