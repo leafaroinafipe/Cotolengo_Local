@@ -16,11 +16,19 @@ function generateId() {
     return Date.now() + '-' + Math.random().toString(36).substring(2, 9);
 }
 
+// ── UTILS: Sanitiza datas vindas do cloud (remove parte de horário) ──────────
+// Corrige bug de datas no formato "2026-05-23T03:00:00Z" retornadas pelo Google Sheets
+// que quebrava tanto o display ("23T03:00:00Z/05/2026") quanto o parser da geração de escala.
+function sanitizeDate(d) {
+    if (!d || typeof d !== 'string') return '';
+    return d.split('T')[0]; // "2026-05-23T03:00:00Z" → "2026-05-23"
+}
+
 const SHIFTS = {
     'M1': { name: 'Mattina 1', h: 7.0, color: '#f59e0b', text: '#1a1a00', period:'morning' },
     'M2': { name: 'Mattina 2', h: 4.5, color: '#fcd34d', text: '#1a1a00', period:'morning' },
     'MF': { name: 'Mattina Festivo', h: 7.5, color: '#f97316', text: '#fff', period:'morning' },
-    'G':  { name: 'Giornata Intera', h: 9.5, color: '#0ea5e9', text: '#fff', period:'morning' },
+    'G':  { name: 'Giornata Intera', h: 8, color: '#0ea5e9', text: '#fff', period:'morning' },
     'P':  { name: 'Pomeriggio', h: 8.5, color: '#8b5cf6', text: '#fff', period:'afternoon' },
     'PF': { name: 'Pomeriggio Festivo', h: 10, color: '#a78bfa', text: '#fff', period:'afternoon' },
     'N':  { name: 'Notte', h: 9, color: '#1e1b4b', text: '#fff', period:'night' },
@@ -422,6 +430,9 @@ async function syncRequestsFromCloud() {
                     }
                     updatedRequests.push(local);
                 } else {
+                    // Sanitiza datas vindas do cloud: Google Sheets pode retornar
+                    // "2026-05-23T03:00:00Z" — o split('T')[0] garante "2026-05-23"
+                    const rawDate = sanitizeDate(cr.startDate || cr.date || '');
                     updatedRequests.push({
                         id: crId,
                         type: cr.type || 'OFF',
@@ -430,9 +441,9 @@ async function syncRequestsFromCloud() {
                         fromNurseId: cr.nurseId || '',
                         nurseName: cr.nurseName || '',
                         fromNurseName: cr.nurseName || '',
-                        startDate: cr.startDate || cr.date || '',
-                        date: cr.startDate || cr.date || '',
-                        endDate: cr.endDate || '',
+                        startDate: rawDate,
+                        date: rawDate,
+                        endDate: sanitizeDate(cr.endDate || ''),
                         desc: cr.desc || '',
                         reason: cr.desc || '',
                         createdAt: cr.createdAt || new Date().toISOString(),
@@ -520,7 +531,7 @@ function renderCalendar() {
     // saveData movido para pontos de mutação de estado específicos
     
     const days   = daysInMonth(currentMonth);
-    const dayNames = ['D','S','T','Q','Q','S','S'];
+    const dayNames = ['D','L','M','M','G','V','S'];
 
     // Header — construído como string para evitar O(n²) de reflow
     const hdRow = document.getElementById('calendarDays');
@@ -745,8 +756,8 @@ function renderOccurrences() {
     
     tbody.innerHTML = occurrences.sort((a,b)=>b.id - a.id).map(o => {
         const nurse = NURSES.find(n => n.id === o.nurseId);
-        const sDate = o.start.split('-').reverse().join('/');
-        const eDate = o.end.split('-').reverse().join('/');
+        const sDate = sanitizeDate(o.start).split('-').reverse().join('/');
+        const eDate = sanitizeDate(o.end).split('-').reverse().join('/');
         const shiftInfo = shiftInfoAlias(o.type);
         const color = shiftInfo ? (shiftInfo.color === '#e2e8f0' ? '#64748b' : shiftInfo.color) : '#666';
         
@@ -1014,8 +1025,8 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
     requests.forEach(req => {
         if (req.status !== 'approved') return;
         if (['FE', 'OFF', 'AT', 'OFF_INJ', 'vacation', 'justified', 'unexcused'].includes(req.type)) {
-            let startStr = req.startDate || req.date;
-            let endStr = req.endDate || startStr;
+            let startStr = sanitizeDate(req.startDate || req.date || '');
+            let endStr   = sanitizeDate(req.endDate || startStr);
             if (!startStr && req.day) {
                 const tempD = new Date(y, m, req.day);
                 startStr = tempD.toISOString().split('T')[0];
@@ -1991,8 +2002,10 @@ function getReqDetails(req) {
         const toShiftName = SHIFTS[req.toShift]?.name || req.toShift || '—';
         h += `<div class="req-detail-row"><span class="req-detail-icon">🔄</span><span>${fromShiftName} ➔ ${req.toNurseName || '—'} (${toShiftName})</span></div>`;
     } else if (req.type==='vacation' || req.type==='FE' || req.type==='AT' || req.type==='OFF' || req.type==='OFF_INJ') {
-        const dStrStart = req.startDate ? req.startDate.split('-').reverse().join('/') : (req.date ? req.date.split('-').reverse().join('/') : '');
-        const dStrEnd = req.endDate ? req.endDate.split('-').reverse().join('/') : dStrStart;
+        const rawStart = sanitizeDate(req.startDate || req.date || '');
+        const rawEnd   = sanitizeDate(req.endDate || rawStart);
+        const dStrStart = rawStart ? rawStart.split('-').reverse().join('/') : '';
+        const dStrEnd   = rawEnd   ? rawEnd.split('-').reverse().join('/')   : dStrStart;
         h += `<div class="req-detail-row"><span class="req-detail-icon">📅</span><span>${dStrStart === dStrEnd ? dStrStart : dStrStart + ' a ' + dStrEnd}</span></div>`;
         if(req.desc) h += `<div class="req-detail-row"><span class="req-detail-icon">💬</span><span>${req.desc}</span></div>`;
         if(req.attachment) h += `<div class="req-detail-row"><span class="req-detail-icon">📎</span><span>${req.attachment}</span></div>`;
@@ -2006,12 +2019,46 @@ function getReqDetails(req) {
     return h;
 }
 
+// ── SYNC COMPLETO DE REQUISIÇÕES NA NUVEM ────────────────────
+// Chamado após exclusões locais para garantir que o cloud não "ressuscite"
+// requisições deletadas na próxima sincronização.
+async function syncAllRequestsToCloud() {
+    if (!GOOGLE_API_URL) return;
+    try {
+        const reqRows = requests.map(r => ({
+            id: String(r.id),
+            type: r.type,
+            status: r.status,
+            nurseId: r.nurseId || r.fromNurseId || '',
+            nurseName: r.nurseName || r.fromNurseName || '',
+            startDate: r.startDate || r.date || '',
+            endDate: r.endDate || r.startDate || r.date || '',
+            desc: r.desc || r.reason || '',
+            createdAt: r.createdAt || '',
+            approvedAt: r.approvedAt || '',
+            approvedBy: r.approvedBy || ''
+        }));
+        const reqUrl = `${GOOGLE_API_URL}?action=bulkWrite&sheetName=Solicitacoes&apiKey=${API_KEY}`;
+        await fetch(reqUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({ clearAll: true, rows: reqRows })
+        });
+        console.log('[SYNC] Lista completa de requests sincronizada na nuvem após exclusão.');
+    } catch (e) {
+        console.warn('[SYNC] Erro ao sincronizar lista de requests pós-exclusão:', e);
+    }
+}
+
 function deleteRequest(id) {
     requests = requests.filter(r=>String(r.id)!==String(id));
     renderRequests();
     updateBadge();
     saveData();
     toast('Richiesta eliminata', 'info');
+    // Sincroniza a exclusão na nuvem para evitar que a requisição "ressuscite"
+    // na próxima sincronização do cloud (Bug 2 — deleção não persistia no cloud)
+    syncAllRequestsToCloud();
 }
 
 function approveRequest(id) {
@@ -2026,8 +2073,8 @@ function approveRequest(id) {
             nurseId: req.nurseId,
             type: robType,
             visualType: req.type,
-            start: req.startDate,
-            end: req.endDate,
+            start: sanitizeDate(req.startDate),
+            end: sanitizeDate(req.endDate),
             desc: req.desc,
             attachment: req.attachment
         });
