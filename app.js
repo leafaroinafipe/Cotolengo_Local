@@ -177,12 +177,17 @@ async function publishToCloud() {
         const days = daysInMonth(currentMonth);
         const displayNurses = getMonthlyNurses();
 
+        // AbortController para timeout de segurança em todas as chamadas de publicação
+        const pubController = new AbortController();
+        const pubTimeout = setTimeout(() => pubController.abort(), 30000); // 30s timeout global
+
         // 0. Setup headers para Escala (usa nomes padrão do app)
         const setupEscala = `${GOOGLE_API_URL}?action=setupHeaders&sheetName=Escala&apiKey=${API_KEY}`;
         await fetch(setupEscala, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ headers: ['nurseId','month','year','d1','d2','d3','d4','d5','d6','d7','d8','d9','d10','d11','d12','d13','d14','d15','d16','d17','d18','d19','d20','d21','d22','d23','d24','d25','d26','d27','d28','d29','d30','d31'] })
+            body: JSON.stringify({ headers: ['nurseId','month','year','d1','d2','d3','d4','d5','d6','d7','d8','d9','d10','d11','d12','d13','d14','d15','d16','d17','d18','d19','d20','d21','d22','d23','d24','d25','d26','d27','d28','d29','d30','d31'] }),
+            signal: pubController.signal
         });
 
         // 1. Publicar Funcionários — usando os nomes de coluna do Sheet existente
@@ -196,10 +201,8 @@ async function publishToCloud() {
         await fetch(funcUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({
-                clearAll: true,
-                rows: nursesRows
-            })
+            body: JSON.stringify({ clearAll: true, rows: nursesRows }),
+            signal: pubController.signal
         });
 
         // 2. Publicar Escala do mês atual (limpa o mês e regrava)
@@ -215,10 +218,8 @@ async function publishToCloud() {
         await fetch(escalaUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({
-                clearFilter: { column: 'month', value: String(m + 1) },
-                rows: escalaRows
-            })
+            body: JSON.stringify({ clearFilter: { column: 'month', value: String(m + 1) }, rows: escalaRows }),
+            signal: pubController.signal
         });
 
         // 3. Publicar Solicitações (limpa todas e regrava)
@@ -239,13 +240,20 @@ async function publishToCloud() {
         await fetch(reqUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ clearAll: true, rows: reqRows })
+            body: JSON.stringify({ clearAll: true, rows: reqRows }),
+            signal: pubController.signal
         });
 
+        clearTimeout(pubTimeout);
         toast('☁️ Turni pubblicati in Cloud! I dipendenti possono già vederli nell\'App.', 'success', 5000);
     } catch (error) {
-        console.error('Erro ao publicar na nuvem:', error);
-        toast('Errore nella pubblicazione nel cloud. Verifica la connessione.', 'error');
+        if (error.name === 'AbortError') {
+            console.warn('[PUBLISH] Timeout na publicação — operação cancelada após 30s.');
+            toast('⏱ Tempo limite excedido na publicação. Tenta novamente.', 'warning', 5000);
+        } else {
+            console.error('Erro ao publicar na nuvem:', error);
+            toast('Errore nella pubblicazione nel cloud. Verifica la connessione.', 'error');
+        }
     }
 
     btn.innerHTML = originalText;
@@ -494,11 +502,14 @@ async function syncScheduleFromCloud() {
             let loaded = 0;
             const sheetMonthValue = String(m + 1); // 1 a 12 base Sheets Visual
             
+            const maxDays = new Date(y, m + 1, 0).getDate(); // Dias reais do mês
             dbRes.data.forEach(row => {
                 if (String(row.month) === sheetMonthValue && String(row.year) === String(y)) {
-                    for (let d = 1; d <= 31; d++) {
+                    // Valida que nurseId existe no sistema antes de carregar
+                    if (!NURSES.find(n => n.id === row.nurseId)) return;
+                    for (let d = 1; d <= maxDays; d++) { // Só dias válidos do mês, sem overflow
                         let shiftCode = row['d' + d];
-                        if (shiftCode) {
+                        if (shiftCode && SHIFTS[shiftCode]) { // Valida código de turno
                             schedule[`${row.nurseId}_${m}_${y}_${d}`] = shiftCode;
                             loaded++;
                         }
@@ -658,8 +669,10 @@ function renderCalendarSummary() {
     });
     
     html += `</tr></thead><tbody>`;
-    
-    NURSES.forEach(n => {
+
+    // Usa getMonthlyNurses() para mostrar apenas enfermeiras ativas no mês
+    const summaryNurses = getMonthlyNurses();
+    summaryNurses.forEach(n => {
         html += `<tr><td style="text-align: left;"><strong>${n.name}</strong></td>`;
         
         // 1. Turnos Count
@@ -781,6 +794,20 @@ function renderOccurrences() {
 }
 
 let currentAttachedFile = null;
+
+// Mostra/oculta painel de upload baseado no tipo de ocorrência selecionado
+function toggleAttachmentUI() {
+    const reason = document.getElementById('occReason')?.value;
+    const panel = document.getElementById('attachmentPanel');
+    if (!panel) return;
+    // Certificato/Licenza (AT) exige anexo obrigatório
+    if (reason === 'AT') {
+        panel.classList.remove('hidden');
+    } else {
+        panel.classList.add('hidden');
+        resetAttachment();
+    }
+}
 
 function toggleRhForm() {
     const rf = document.getElementById('rhFormContainer');
@@ -924,19 +951,25 @@ function confirmAndGenerateSchedule() {
     generateSchedule(tempHourLimits, 1);
 }
 
-// ── SCHEDULE ALGORITHM — SMART ROSTER (HEURÍSTICA DE PONTUAÇÃO MÚLTIPLA) ────
+// ── SCHEDULE ALGORITHM — SMART ROSTER (SOLVER HÍBRIDO: HEURÍSTICA + SCORING MULTI-EPOCH) ────
+// Arquitetura: Monte Carlo multi-epoch com greedy scoring ponderado.
+// Gera N simulações independentes com randomização controlada e seleciona a de maior fitness.
+// Inclui lookahead para o próximo mês para evitar restrições de borda.
 async function generateSchedule(hourLimits = {}, startDay = 1) {
     document.getElementById('loadingOverlay').classList.remove('hidden');
-    
+
     // Pequeno atraso para a interface conseguir renderizar a tela de carregamento (Spinner)
     await new Promise(r => setTimeout(r, 60));
-    
+
     const m = currentMonth.getMonth();
     const y = currentMonth.getFullYear();
     const prefix = `_${m}_${y}_`;
-    
+
     const days = daysInMonth(currentMonth);
-    const simDays = days + 7; // Lookahead (Sobreposição no próximo mês para resolver pontas cegas)
+    // Lookahead estendido: simula até o final do próximo mês para resolver pontas cegas
+    // e permitir que o solver considere o mês seguinte sem aplicar a escala gerada nele
+    const nextMonthDays = new Date(y, m + 2, 0).getDate();
+    const simDays = days + nextMonthDays; // Mês atual + próximo mês completo
     const hasVacations = occurrences.length > 0;
     const MAX_CONSEC = hasVacations ? 4 : 3;
 
@@ -1161,8 +1194,11 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         }
 
         // Total per weekday: N(night phase) + M1 + P + (G or M2) = 4 shifts exactly
-        // G and M2 alternate to ensure even distribution across the month
-        let gCount = 0, m2Count = 0;
+        // G e M2 são distribuídos de forma equilibrada ao longo do mês
+        // Rastreamento por enfermeira para equilíbrio individual
+        let globalGCount = 0, globalM2Count = 0;
+        const nurseGM2Count = {};
+        NURSES.forEach(n => { nurseGM2Count[n.id] = { g: 0, m2: 0 }; });
 
         // Fase: Diurna e Plantões Mistos
         for (let d = startDay; d <= simDays; d++) {
@@ -1178,7 +1214,7 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                         }
                     }
                 });
-                continue; 
+                continue;
             }
 
             let targets;
@@ -1186,19 +1222,23 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                 targets = ['MF', 'PF'];  // Weekend: 2 day shifts + N = 3
             } else {
                 // Weekday: always M1 + P + exactly ONE of G or M2 = 3 day shifts
-                // Alternating G/M2 for even monthly distribution
+                // Distribuição inteligente: alterna G/M2 com randomização ponderada
                 let thirdShift;
-                if (gCount <= m2Count) {
+                if (globalGCount <= globalM2Count) {
                     thirdShift = 'G';
-                    gCount++;
-                } else {
+                    globalGCount++;
+                } else if (globalM2Count < globalGCount) {
                     thirdShift = 'M2';
-                    m2Count++;
+                    globalM2Count++;
+                } else {
+                    // Desempate aleatório para exploração
+                    thirdShift = Math.random() < 0.5 ? 'G' : 'M2';
+                    if (thirdShift === 'G') globalGCount++; else globalM2Count++;
                 }
                 targets = ['M1', 'P', thirdShift];  // 3 day shifts + N = 4 total
             }
 
-            // Shuffle target order
+            // Shuffle target order para evitar viés de alocação
             targets.sort(() => Math.random() - 0.5); 
 
             for (let t of targets) {
@@ -1219,15 +1259,15 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                 });
 
                 // ── FALLBACK RELAXADO (salvação para não deixar buraco) ──
+                // Tolerância reduzida: no máximo +12h acima do limite individual
                 if (free.length === 0) {
                     free = NURSES.filter(n => {
                         if (getSh(tSched, n.id, d)) return false;
                         let p1 = d>1 ? getSh(tSched, n.id, d-1) : null;
                         if (p1 === 'N') return false;
                         if (!checkTransitions(tSched, n.id, d, t)) return false;
-                        // Relaxamento massivo do individual limit para evitar holes, mas ainda pontuando as menos trabalhadas.
                         const individualLimit = hourLimits[n.id] ? hourLimits[n.id] : 130;
-                        if (nurseHoursTemp(tSched, n.id) + SHIFTS[t].h > (individualLimit + 25)) return false;
+                        if (nurseHoursTemp(tSched, n.id) + SHIFTS[t].h > (individualLimit + 12)) return false;
                         return true;
                     });
                 }
@@ -1235,11 +1275,29 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                 if (free.length > 0) {
                     free.forEach(n => {
                         let p1 = d>1 ? getSh(tSched, n.id, d-1) : null;
-                        let seqPenalty = (p1 === t) ? 200 : 0; // Penaliza brutalmente turnos repetidos exatamente iguais
-                        n.tmpScore = (shiftCountTemp(n.id, t) * 8) + nurseHoursTemp(tSched, n.id) + seqPenalty + (Math.random() * 5);
+                        let seqPenalty = (p1 === t) ? 300 : 0; // Penaliza turnos repetidos consecutivos
+                        // Bonus/penalidade para equilíbrio G/M2 por enfermeira
+                        let gm2Bias = 0;
+                        if (t === 'G') gm2Bias = (nurseGM2Count[n.id]?.g || 0) * 12;
+                        if (t === 'M2') gm2Bias = (nurseGM2Count[n.id]?.m2 || 0) * 12;
+                        // Penalidade de fim de semana: favorecer quem trabalhou menos fins de semana
+                        let wkBias = 0;
+                        if (wk) {
+                            let wkCount = 0;
+                            for (let wd = 1; wd < d; wd++) {
+                                const wdow = new Date(y, m, wd).getDay();
+                                if ((wdow === 0 || wdow === 6) && getSh(tSched, n.id, wd) && !['OFF','FE','AT'].includes(getSh(tSched, n.id, wd))) wkCount++;
+                            }
+                            wkBias = wkCount * 15;
+                        }
+                        n.tmpScore = (shiftCountTemp(n.id, t) * 10) + nurseHoursTemp(tSched, n.id) + seqPenalty + gm2Bias + wkBias + (Math.random() * 5);
                     });
                     free.sort((a,b) => a.tmpScore - b.tmpScore);
-                    setSh(tSched, free[0].id, d, t);
+                    const chosen = free[0];
+                    setSh(tSched, chosen.id, d, t);
+                    // Atualizar rastreamento G/M2
+                    if (t === 'G' && nurseGM2Count[chosen.id]) nurseGM2Count[chosen.id].g++;
+                    if (t === 'M2' && nurseGM2Count[chosen.id]) nurseGM2Count[chosen.id].m2++;
                 } else {
                     emptyShifts += 1;
                 }
@@ -1253,18 +1311,22 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
             }
         });
 
-        // Computa Variância + penaliza dias incompletos + Repetições Sequenciais
+        // ── FUNÇÃO DE FITNESS COMPOSTA (MULTI-CRITÉRIO) ──
+        // Avalia qualidade da escala gerada em múltiplas dimensões
         let maxH = 0, minH = 999;
         let repScore = 0;
-        
+        let weekendPenalty = 0;
+        let postNightViolations = 0;
+        let gm2BalancePenalty = 0;
+
         NURSES.forEach(n => {
             let h = nurseHoursTemp(tSched, n.id);
             if (h > maxH) maxH = h;
             if (h < minH) minH = h;
-            
-            // Vasculhando repetições sequenciais de turnos no mês
+
+            // 1. Repetições sequenciais de turnos iguais
             let cons = 0;
-            for (let dt=2; dt<=simDays; dt++) {
+            for (let dt=2; dt<=days; dt++) {
                 let curr = getSh(tSched, n.id, dt);
                 let prev = getSh(tSched, n.id, dt-1);
                 if (curr && curr !== 'OFF' && curr !== 'FE' && curr !== 'AT') {
@@ -1272,9 +1334,41 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                 }
             }
             repScore += cons;
+
+            // 2. Equilíbrio de fins de semana trabalhados por enfermeira
+            let wkendWorked = 0;
+            for (let dd = 1; dd <= days; dd++) {
+                const ddow = new Date(y, m, dd).getDay();
+                if (ddow === 0 || ddow === 6) {
+                    const s = getSh(tSched, n.id, dd);
+                    if (s && !['OFF','FE','AT'].includes(s)) wkendWorked++;
+                }
+            }
+            // Penaliza se uma enfermeira trabalha mais de 4 dias de fim de semana ou 0
+            if (wkendWorked > 4) weekendPenalty += (wkendWorked - 4) * 3000;
+            if (wkendWorked === 0) weekendPenalty += 2000;
+
+            // 3. Violações de descanso pós-noturno (deve ter OFF depois de noite)
+            for (let dd = 1; dd < days; dd++) {
+                if (getSh(tSched, n.id, dd) === 'N') {
+                    const next = getSh(tSched, n.id, dd+1);
+                    if (next && !['OFF','FE','AT','N'].includes(next)) {
+                        postNightViolations++;
+                    }
+                }
+            }
+
+            // 4. Equilíbrio G vs M2 por enfermeira
+            let gCnt = 0, m2Cnt = 0;
+            for (let dd = 1; dd <= days; dd++) {
+                const s = getSh(tSched, n.id, dd);
+                if (s === 'G') gCnt++;
+                if (s === 'M2') m2Cnt++;
+            }
+            gm2BalancePenalty += Math.abs(gCnt - m2Cnt) * 200;
         });
-        
-        // Penalizar dias úteis do mês real que ficaram com < 3 turnos diurnos preenchidos
+
+        // 5. Penalizar dias úteis do mês real que ficaram com < 3 turnos diurnos preenchidos
         let incompleteDays = 0;
         for (let dd = 1; dd <= days; dd++) {
             const ddow = new Date(y, m, dd).getDay();
@@ -1284,30 +1378,41 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                 const s = getSh(tSched, n.id, dd);
                 if (s && !['OFF','FE','AT','N'].includes(s)) filledCount++;
             });
-            // Weekday needs 3 day shifts (M1+P+G/M2) + 1 night = 4 total. Day shifts only here.
             if (filledCount < 3) incompleteDays++;
         }
-        
-        let fitness = 100000 - (emptyShifts * 25000) - (incompleteDays * 35000) - (repScore * 5000) - ((maxH - minH) * 5);
+
+        // Fitness composta ponderada
+        let fitness = 100000
+            - (emptyShifts * 25000)          // Buracos críticos
+            - (incompleteDays * 35000)       // Dias incompletos
+            - (repScore * 5000)              // Turnos repetidos consecutivos
+            - (weekendPenalty)               // Desequilíbrio de fins de semana
+            - (postNightViolations * 8000)   // Violação descanso pós-noturno
+            - (gm2BalancePenalty)             // Desequilíbrio G/M2
+            - ((maxH - minH) * 10);          // Variância de horas (peso dobrado)
+
         return { scheduleModel: tSched, fitness: fitness, emptyShifts: emptyShifts };
     }
 
-    // DISPARO E FILTRAGEM DE MODELOS (MONTAGEM DE MÚLTIPLAS COMBINAÇÕES/SCORING)
+    // DISPARO E FILTRAGEM DE MODELOS (SOLVER HÍBRIDO: MONTE CARLO MULTI-EPOCH)
+    // Gera múltiplas simulações independentes e seleciona a de maior fitness.
+    // A randomização em cada epoch garante exploração do espaço de soluções.
     let bestSim = null;
     let validIterCount = 0;
-    
-    // Tenta montar 800 opções de matriz visual até achar os padrões sem erro. 
-    for (let i = 0; i < 800; i++) {
+    const MAX_EPOCHS = 1200;  // Aumentado para melhor exploração
+
+    for (let i = 0; i < MAX_EPOCHS; i++) {
         let sim = simulateOneScale();
-        
+
         if (!bestSim || sim.fitness > bestSim.fitness) {
             bestSim = sim;
+            validIterCount = 0; // Reset ao encontrar solução melhor
         }
-        
-        // Critério de parada adiantado para economizar RAM do navegador se a escala for impecável:
-        if (bestSim.emptyShifts === 0 && bestSim.fitness > 99950) {
+
+        // Critério de parada adiantado: se encontrou solução excelente e estabilizou
+        if (bestSim.emptyShifts === 0 && bestSim.fitness > 99500) {
             validIterCount++;
-            if (validIterCount > 5) break; 
+            if (validIterCount > 10) break;  // Mais iterações de confirmação
         }
     }
 
@@ -1354,9 +1459,9 @@ function assign(nurseId, day, code) { schedule[key(nurseId,day)] = code; }
 function assignIfFree(nurseId, day, code) { if (!schedule[key(nurseId,day)]) assign(nurseId,day,code); }
 
 function nurseHours(nurseId) {
-    const days = daysInMonth(currentMonth);
+    const totalDays = daysInMonth(currentMonth);
     let h = 0;
-    for (let d=1; d<=days; d++) h += (SHIFTS[getShift(nurseId,d)]?.h||0);
+    for (let d=1; d<=totalDays; d++) h += (SHIFTS[getShift(nurseId,d)]?.h||0);
     return h;
 }
 
@@ -2024,6 +2129,8 @@ function getReqDetails(req) {
 // requisições deletadas na próxima sincronização.
 async function syncAllRequestsToCloud() {
     if (!GOOGLE_API_URL) return;
+    const syncCtrl = new AbortController();
+    const syncTO = setTimeout(() => syncCtrl.abort(), 15000);
     try {
         const reqRows = requests.map(r => ({
             id: String(r.id),
@@ -2042,11 +2149,18 @@ async function syncAllRequestsToCloud() {
         await fetch(reqUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ clearAll: true, rows: reqRows })
+            body: JSON.stringify({ clearAll: true, rows: reqRows }),
+            signal: syncCtrl.signal
         });
+        clearTimeout(syncTO);
         console.log('[SYNC] Lista completa de requests sincronizada na nuvem após exclusão.');
     } catch (e) {
-        console.warn('[SYNC] Erro ao sincronizar lista de requests pós-exclusão:', e);
+        clearTimeout(syncTO);
+        if (e.name === 'AbortError') {
+            console.warn('[SYNC] Timeout na sincronização de exclusão.');
+        } else {
+            console.warn('[SYNC] Erro ao sincronizar lista de requests pós-exclusão:', e);
+        }
     }
 }
 
@@ -2178,56 +2292,260 @@ function updateBadge() {
     }
 }
 
-// ── REPORTS RENDER ────────────────────────────────────────────
+// ── REPORTS RENDER — DASHBOARD COMPLETO (COORDINATRICE + INFERMIERE) ──────
 function renderReports() {
-    if (!currentUser || isCoordinator) {
-        document.getElementById('reportsTab').innerHTML =
-            `<div class="empty-state" style="padding:80px"><div class="empty-icon">📊</div><p>Report disponibile per le infermiere</p></div>`;
+    if (!currentUser) return;
+
+    const daysInMo = daysInMonth(currentMonth);
+    const m = currentMonth.getMonth();
+    const y = currentMonth.getFullYear();
+    const months = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+    const monthLabel = `${months[m]} ${y}`;
+
+    // Seleção de enfermeiras: coordenadora vê todas, enfermeira vê só a dela
+    const displayNurses = isCoordinator ? getMonthlyNurses() : [NURSES.find(n => n.id === currentUser.id)].filter(Boolean);
+
+    if (displayNurses.length === 0) {
+        document.getElementById('reportsTab').innerHTML = `<div class="empty-state" style="padding:80px"><div class="empty-icon">📊</div><p>Nessun personale attivo questo mese.</p></div>`;
         return;
     }
-    const days = daysInMonth(currentMonth);
-    let totalH=0, workDays=0, restDays=0, nightShifts=0;
-    const counts = {};
-    for (let d=1; d<=days; d++) {
-        const code = getShift(currentUser.id, d);
-        const sh   = SHIFTS[code];
-        totalH    += sh.h;
-        counts[code] = (counts[code]||0)+1;
-        if (code==='OFF'||code==='FE') restDays++;
-        else workDays++;
-        if (code==='N') nightShifts++;
-    }
-    document.getElementById('totalHoursReport').textContent = totalH.toFixed(1)+'h';
-    document.getElementById('workDaysReport').textContent   = workDays;
-    document.getElementById('restDaysReport').textContent   = restDays;
-    document.getElementById('nightShiftsReport').textContent= nightShifts;
 
-    // Shift distribution table
-    const rows = Object.entries(counts).filter(([c])=>c!=='OFF').map(([code,cnt])=>{
-        const sh = SHIFTS[code];
-        return `<tr>
-            <td><span class="shift-badge" style="background:${sh.color};color:${sh.text}">${code}</span> ${sh.name}</td>
-            <td>${cnt}×</td>
-            <td><strong>${(sh.h*cnt).toFixed(1)}h</strong></td>
-        </tr>`;
-    }).join('');
-    document.getElementById('shiftsTable').innerHTML =
-        `<table class="rpt-table"><thead><tr><th>Turno</th><th>Qta</th><th>Ore</th></tr></thead><tbody>${rows}</tbody></table>`;
+    // ── COLETA DE DADOS AGREGADOS ──
+    let teamTotalH = 0, teamWorkDays = 0, teamRestDays = 0, teamNightShifts = 0;
+    let teamAbsences = 0, teamVacations = 0;
+    const nurseData = [];
 
-    // Night quota
-    if (currentUser.nightQuota > 0) {
-        const pct = Math.min((nightShifts/currentUser.nightQuota)*100, 100);
-        document.getElementById('nightQuotaSection').style.display='block';
-        document.getElementById('nightQuotaReport').innerHTML =
-            `<p style="font-size:20px;font-weight:800;margin-bottom:12px">${nightShifts} / ${currentUser.nightQuota}</p>
-            <div class="quota-bar"><div class="quota-fill" style="width:${pct}%"></div></div>`;
-    }
+    displayNurses.forEach(n => {
+        let totalH = 0, workDays = 0, restDays = 0, nightCount = 0;
+        let feCount = 0, atCount = 0, offCount = 0;
+        const shiftCounts = {};
+        let weekendsWorked = 0;
+        const weekendSet = new Set();
+
+        for (let d = 1; d <= daysInMo; d++) {
+            const code = getShift(n.id, d);
+            const sh = SHIFTS[code];
+            if (!sh) continue;
+
+            totalH += sh.h;
+            shiftCounts[code] = (shiftCounts[code] || 0) + 1;
+
+            if (['OFF'].includes(code)) { offCount++; restDays++; }
+            else if (code === 'FE') { feCount++; restDays++; }
+            else if (code === 'AT') { atCount++; restDays++; }
+            else { workDays++; }
+            if (code === 'N') nightCount++;
+
+            // Fins de semana trabalhados
+            const dow = new Date(y, m, d).getDay();
+            if ((dow === 0 || dow === 6) && !['OFF','FE','AT'].includes(code)) {
+                const sundayRef = d + (dow === 6 ? 1 : 0);
+                weekendSet.add(sundayRef);
+            }
+        }
+        weekendsWorked = weekendSet.size;
+
+        teamTotalH += totalH;
+        teamWorkDays += workDays;
+        teamRestDays += restDays;
+        teamNightShifts += nightCount;
+        teamAbsences += atCount;
+        teamVacations += feCount;
+
+        nurseData.push({
+            nurse: n, totalH, workDays, restDays, nightCount,
+            feCount, atCount, offCount, shiftCounts, weekendsWorked
+        });
+    });
+
+    // Contadores de requests do mês
+    const monthRequests = requests.filter(r => {
+        const rDate = sanitizeDate(r.startDate || r.date || r.createdAt?.split('T')[0] || '');
+        if (!rDate) return false;
+        const rd = new Date(rDate + 'T00:00:00');
+        return rd.getMonth() === m && rd.getFullYear() === y;
+    });
+    const pendingReqs = monthRequests.filter(r => r.status === 'pending').length;
+    const approvedReqs = monthRequests.filter(r => r.status === 'approved').length;
+    const rejectedReqs = monthRequests.filter(r => r.status === 'rejected').length;
+
+    // Taxa de absenteísmo: (dias AT + FE) / (total dias possíveis) * 100
+    const totalPossibleDays = displayNurses.length * daysInMo;
+    const absentDays = nurseData.reduce((s, nd) => s + nd.atCount + nd.feCount, 0);
+    const absenteeismRate = totalPossibleDays > 0 ? ((absentDays / totalPossibleDays) * 100).toFixed(1) : '0.0';
+
+    // Horas médias
+    const avgHours = displayNurses.length > 0 ? (teamTotalH / displayNurses.length).toFixed(1) : '0.0';
+    const maxH = Math.max(...nurseData.map(nd => nd.totalH));
+    const minH = Math.min(...nurseData.map(nd => nd.totalH));
+    const hourSpread = (maxH - minH).toFixed(1);
+
+    // ── RENDER HTML ──
+    const tab = document.getElementById('reportsTab');
+    tab.innerHTML = `
+    <div class="reports-wrap" style="max-width:1200px;">
+        <div class="rpt-header">
+            <h2>📊 Dashboard Operativo</h2>
+            <span class="rpt-month">${monthLabel}</span>
+        </div>
+
+        <!-- KPI Cards -->
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px,1fr));">
+            <div class="stat-card stat-primary">
+                <div class="stat-lbl">Ore Totali Team</div>
+                <div class="stat-val" style="font-size:28px;">${teamTotalH.toFixed(1)}h</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">Media: ${avgHours}h/persona</div>
+            </div>
+            <div class="stat-card stat-success">
+                <div class="stat-lbl">Giorni Lavorati</div>
+                <div class="stat-val" style="font-size:28px;">${teamWorkDays}</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">Riposo: ${teamRestDays}</div>
+            </div>
+            <div class="stat-card stat-night">
+                <div class="stat-lbl">Turni Notturni</div>
+                <div class="stat-val" style="font-size:28px;">${teamNightShifts}</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">${daysInMo} notti necessarie</div>
+            </div>
+            <div class="stat-card stat-warning">
+                <div class="stat-lbl">Tasso Assenteismo</div>
+                <div class="stat-val" style="font-size:28px;">${absenteeismRate}%</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">${absentDays} giorni assenti</div>
+            </div>
+        </div>
+
+        <!-- Indicadores de RH -->
+        <div class="report-section">
+            <h3>📋 Indicatori Risorse Umane</h3>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:16px; margin-bottom:16px;">
+                <div style="background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.2); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:24px; font-weight:900; color:var(--warning);">${pendingReqs}</div>
+                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Richieste In Attesa</div>
+                </div>
+                <div style="background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.2); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:24px; font-weight:900; color:var(--success);">${approvedReqs}</div>
+                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Richieste Approvate</div>
+                </div>
+                <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.2); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:24px; font-weight:900; color:var(--danger);">${rejectedReqs}</div>
+                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Richieste Rifiutate</div>
+                </div>
+                <div style="background:rgba(139,92,246,0.08); border:1px solid rgba(139,92,246,0.2); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:24px; font-weight:900; color:var(--primary-light);">${hourSpread}h</div>
+                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Dispersione Ore (Max-Min)</div>
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:16px;">
+                <div style="background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.15); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:24px; font-weight:900; color:var(--success);">${teamVacations}</div>
+                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Giorni Ferie (FE)</div>
+                </div>
+                <div style="background:rgba(239,68,68,0.05); border:1px solid rgba(239,68,68,0.15); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:24px; font-weight:900; color:var(--danger);">${teamAbsences}</div>
+                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Certificati/Licenze (AT)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Ranking de Horas por Enfermeira -->
+        <div class="report-section">
+            <h3>⏱ Ranking Ore per Infermiera</h3>
+            <table class="rpt-table">
+                <thead><tr>
+                    <th style="text-align:left">Infermiera</th>
+                    <th>Ore Tot.</th>
+                    <th>Lavorati</th>
+                    <th>Riposo</th>
+                    <th>Notti</th>
+                    <th>Ferie</th>
+                    <th>Certif.</th>
+                    <th>Fine Sett.</th>
+                    <th>Carico</th>
+                </tr></thead>
+                <tbody>
+                ${nurseData.sort((a,b) => b.totalH - a.totalH).map((nd, idx) => {
+                    const pct = maxH > 0 ? ((nd.totalH / maxH) * 100).toFixed(0) : 0;
+                    const barColor = nd.totalH >= maxH ? 'var(--danger)' : nd.totalH <= minH ? 'var(--success)' : 'var(--primary)';
+                    return `<tr>
+                        <td style="text-align:left"><strong>${idx+1}.</strong> ${nd.nurse.name}</td>
+                        <td><strong>${nd.totalH.toFixed(1)}h</strong></td>
+                        <td>${nd.workDays}</td>
+                        <td>${nd.restDays}</td>
+                        <td>${nd.nightCount}</td>
+                        <td>${nd.feCount}</td>
+                        <td>${nd.atCount}</td>
+                        <td>${nd.weekendsWorked}</td>
+                        <td style="min-width:120px;">
+                            <div style="background:rgba(255,255,255,0.06); border-radius:99px; height:8px; overflow:hidden;">
+                                <div style="width:${pct}%; height:100%; background:${barColor}; border-radius:99px; transition:width 0.6s;"></div>
+                            </div>
+                        </td>
+                    </tr>`;
+                }).join('')}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Distribuição de Turnos por Enfermeira -->
+        <div class="report-section">
+            <h3>🔄 Distribuzione Turni per Infermiera</h3>
+            <div style="overflow-x:auto;">
+            <table class="rpt-table">
+                <thead><tr>
+                    <th style="text-align:left">Infermiera</th>
+                    ${['M1','M2','MF','G','P','PF','N','OFF','FE','AT'].map(c =>
+                        `<th><span style="display:inline-block; width:10px; height:10px; border-radius:3px; background:${SHIFTS[c].color}; margin-right:4px; vertical-align:middle;"></span>${c}</th>`
+                    ).join('')}
+                </tr></thead>
+                <tbody>
+                ${nurseData.map(nd => `<tr>
+                    <td style="text-align:left">${nd.nurse.name}</td>
+                    ${['M1','M2','MF','G','P','PF','N','OFF','FE','AT'].map(c => {
+                        const val = nd.shiftCounts[c] || 0;
+                        return `<td style="font-weight:${val > 0 ? '700' : '400'}; opacity:${val > 0 ? '1' : '0.3'};">${val}</td>`;
+                    }).join('')}
+                </tr>`).join('')}
+                </tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- Quota Noturna -->
+        <div class="report-section">
+            <h3>🌙 Quota Turni Notturni</h3>
+            <div style="display:grid; gap:12px;">
+            ${nurseData.map(nd => {
+                const quota = nd.nurse.nightQuota || 5;
+                const pct = Math.min((nd.nightCount / quota) * 100, 100).toFixed(0);
+                const color = nd.nightCount > quota ? 'var(--danger)' : nd.nightCount === quota ? 'var(--warning)' : 'var(--primary)';
+                return `<div style="display:flex; align-items:center; gap:12px;">
+                    <span style="min-width:140px; font-size:13px; font-weight:600; color:var(--text-2);">${nd.nurse.name}</span>
+                    <div style="flex:1; background:rgba(255,255,255,0.06); border-radius:99px; height:10px; overflow:hidden;">
+                        <div style="width:${pct}%; height:100%; background:${color}; border-radius:99px; transition:width 0.6s;"></div>
+                    </div>
+                    <span style="min-width:60px; text-align:right; font-size:13px; font-weight:700; color:${color};">${nd.nightCount}/${quota}</span>
+                </div>`;
+            }).join('')}
+            </div>
+        </div>
+    </div>`;
 }
 
 // ── INIT ──────────────────────────────────────────────────────
 // ── INIT E GERENCIAMENTO DE FUNCIONÁRIOS ──────────────────────
+
+// Salva dados antes de fechar a página (previne perda por crash/reload)
+window.addEventListener('beforeunload', () => {
+    clearTimeout(_saveTimer);
+    _doSave();
+});
+
+// Tratamento global de erros não capturados para evitar tela branca
+window.addEventListener('error', (e) => {
+    console.error('[NurseShift] Erro global:', e.message, e.filename, e.lineno);
+});
+
 function bootstrap() {
-    loadData(); 
+    loadData();
     initApp();
 }
 if (document.readyState === 'loading') {
