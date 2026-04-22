@@ -29,8 +29,8 @@ const SHIFTS = {
     'M2': { name: 'Mattina 2', h: 4.5, color: '#fcd34d', text: '#1a1a00', period:'morning' },
     'MF': { name: 'Mattina Festivo', h: 7.5, color: '#f97316', text: '#fff', period:'morning' },
     'G':  { name: 'Giornata Intera', h: 8, color: '#0ea5e9', text: '#fff', period:'morning' },
-    'P':  { name: 'Pomeriggio', h: 8.5, color: '#8b5cf6', text: '#fff', period:'afternoon' },
-    'PF': { name: 'Pomeriggio Festivo', h: 10, color: '#a78bfa', text: '#fff', period:'afternoon' },
+    'P':  { name: 'Pomeriggio', h: 8, color: '#8b5cf6', text: '#fff', period:'afternoon' },
+    'PF': { name: 'Pomeriggio Festivo', h: 7.5, color: '#a78bfa', text: '#fff', period:'afternoon' },
     'N':  { name: 'Notte', h: 9, color: '#1e1b4b', text: '#fff', period:'night' },
     'OFF':{ name: 'Riposo', h: 0, color: 'rgba(255,255,255,0.03)', text: 'rgba(255,255,255,0.2)', period:'off' },
     'FE': { name: 'Ferie', h: 0, color: '#10b981', text: '#fff', period:'off' },
@@ -1717,7 +1717,39 @@ function openSwapRequest() {
 }
 
 function onSwapNurseChange() { updateTargetShift(); }
-function onSwapDateChange()  { updateTargetShift(); }
+function onSwapDateChange()  {
+    updateSwapNurseFilter();
+    updateTargetShift();
+}
+function updateSwapNurseFilter() {
+    const dateStr = document.getElementById('swapDateInput').value;
+    const sel = document.getElementById('swapNurseSelect');
+    const prevValue = sel.value;
+    if (!dateStr || !selectedCell) return;
+    const d = new Date(dateStr+'T00:00:00');
+    if (d.getMonth()!==currentMonth.getMonth()||d.getFullYear()!==currentMonth.getFullYear()) return;
+    const day = d.getDate();
+    // Filtra apenas enfermeiras que têm turno naquele dia (excluindo OFF e a própria)
+    const filtered = NURSES.filter(n => {
+        if (n.id === selectedCell.nurseId) return false;
+        const shift = getShift(n.id, day);
+        return shift !== 'OFF';
+    });
+    if (filtered.length === 0) {
+        sel.innerHTML = '<option value="">— Nessuna disponibile in questa data —</option>';
+    } else {
+        sel.innerHTML = '<option value="">— Seleziona —</option>' +
+            filtered.map(n => {
+                const shift = getShift(n.id, day);
+                const shiftName = SHIFTS[shift] ? SHIFTS[shift].name : shift;
+                return `<option value="${n.id}">${n.name} (${shift} — ${shiftName})</option>`;
+            }).join('');
+    }
+    // Restaura seleção anterior se ainda disponível
+    if (prevValue && filtered.some(n => n.id === prevValue)) {
+        sel.value = prevValue;
+    }
+}
 function updateTargetShift() {
     const nurseId = document.getElementById('swapNurseSelect').value;
     const dateStr = document.getElementById('swapDateInput').value;
@@ -2082,7 +2114,10 @@ async function appendRequestToCloud(req) {
             id: String(req.id), type: req.type, status: req.status,
             nurseId: req.nurseId || req.fromNurseId || '', nurseName: req.nurseName || req.fromNurseName || '',
             startDate: req.startDate || req.date || '', endDate: req.endDate || req.startDate || req.date || '',
-            desc: req.desc || req.reason || '', createdAt: req.createdAt || '', approvedAt: '', approvedBy: ''
+            desc: req.desc || req.reason || '',
+            swapNurseId: req.toNurseId || req.swapNurseId || '',
+            swapNurseName: req.toNurseName || req.swapNurseName || '',
+            createdAt: req.createdAt || '', approvedAt: '', approvedBy: ''
         };
         const updUrl = `${GOOGLE_API_URL}?action=update&sheetName=Solicitacoes&apiKey=${API_KEY}`;
         // Envia as propriedades completas para usar o behavior do Google Sheet AppScript de inserir
