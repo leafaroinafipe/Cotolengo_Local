@@ -5,6 +5,7 @@
 // ============================================================
 
 // ── CONFIG ────────────────────────────────────────────────────
+const APP_CACHE_VERSION = 'v2.2'; // Incrementar para forçar resync do cloud
 const COORD_PASS  = 'coord2026';
 const NURSE_PASS  = 'enfermeira123';
 const GOOGLE_API_URL = 'https://script.google.com/macros/s/AKfycbwsfN_I_dP8H6C7odQDPeppoecyiUPAtdo6_P3bBgIj_vfMULKX6Qm5XyZB4P2zmYWiqQ/exec';
@@ -60,13 +61,59 @@ currentMonth.setDate(1); // Força dia 1 para evitar pular mês em dias 31
 let selectedCell  = null;
 let occurrences = []; // stores { id, nurseId, type, start, end, desc }
 let monthlyOrder  = {}; // key: `${month}_${year}` → array of nurseIds
+let reportMonthDate = new Date(); // Período do relatório (independente do calendário)
+reportMonthDate.setDate(1);
+let reportViewMode = 'monthly'; // 'monthly' ou 'annual'
 
 
 // ── UTILS ─────────────────────────────────────────────────────
-function key(nurseId, day) { return `${nurseId}_${currentMonth.getMonth()}_${currentMonth.getFullYear()}_${day}`; }
+function key(nurseId, day) { return `${String(nurseId).trim()}_${currentMonth.getMonth()}_${currentMonth.getFullYear()}_${day}`; }
 function daysInMonth(m) { return new Date(m.getFullYear(), m.getMonth()+1, 0).getDate(); }
 function isWeekend(m, day) { const d = new Date(m.getFullYear(), m.getMonth(), day); return d.getDay()===0||d.getDay()===6; }
+
+// Feriados fixos italianos (mês 0-indexed, dia)
+function getItalianHolidays(year) {
+    const fixed = [
+        [0, 1],   // Capodanno
+        [0, 6],   // Epifania
+        [3, 25],  // Festa della Liberazione
+        [4, 1],   // Festa del Lavoro
+        [5, 2],   // Festa della Repubblica
+        [7, 15],  // Ferragosto
+        [10, 1],  // Tutti i Santi
+        [11, 8],  // Immacolata Concezione
+        [11, 25], // Natale
+        [11, 26], // Santo Stefano
+    ];
+    // Pasquetta (Easter Monday) — cálculo algorítmico
+    const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+    const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4), k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31) - 1;
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    // Pasqua (Easter Sunday) e Pasquetta (Monday)
+    const easter = new Date(year, month, day);
+    const easterMon = new Date(year, month, day + 1);
+    fixed.push([easter.getMonth(), easter.getDate()]);
+    fixed.push([easterMon.getMonth(), easterMon.getDate()]);
+    return fixed;
+}
+
+function isHoliday(monthDate, day) {
+    const y = monthDate.getFullYear();
+    const m = monthDate.getMonth();
+    const holidays = getItalianHolidays(y);
+    return holidays.some(([hm, hd]) => hm === m && hd === day);
+}
+
+function isFestivo(monthDate, day) {
+    return isWeekend(monthDate, day) || isHoliday(monthDate, day);
+}
 function getShift(nurseId, day) { return schedule[key(nurseId,day)] || 'OFF'; }
+function getShiftForMonth(nurseId, day, m, y) { return schedule[`${String(nurseId).trim()}_${m}_${y}_${day}`] || 'OFF'; }
 
 function shiftCount(nurseId, codes) {
     if (!Array.isArray(codes)) codes = [codes];
@@ -113,16 +160,31 @@ function _doSave() {
 
 function loadData() {
     try {
+        // Verifica se é necessário limpar cache (nova versão do app)
+        const savedVersion = localStorage.getItem('escala_app_version');
+        if (savedVersion !== APP_CACHE_VERSION) {
+            console.warn(`[CACHE] Versione cambiata: ${savedVersion} → ${APP_CACHE_VERSION}. Pulisci schedule per forzare resync dal cloud.`);
+            // Limpa APENAS o schedule para forçar resync — mantém nurses, orders, requests
+            localStorage.removeItem('escala_schedule');
+            localStorage.setItem('escala_app_version', APP_CACHE_VERSION);
+        }
+
         const nr = localStorage.getItem('escala_nurses');
         const s = localStorage.getItem('escala_schedule');
         const o = localStorage.getItem('escala_occurrences');
         const m = localStorage.getItem('escala_monthlyOrder');
         const r = localStorage.getItem('escala_requests');
-        if (nr) NURSES = JSON.parse(nr);
+        if (nr) {
+            NURSES = JSON.parse(nr);
+            // Normaliza IDs para string (proteção contra tipos inconsistentes)
+            NURSES.forEach(n => { n.id = String(n.id).trim(); });
+        }
         if (s) schedule = JSON.parse(s);
         if (o) occurrences = JSON.parse(o);
         if (m) monthlyOrder = JSON.parse(m);
         if (r) requests = JSON.parse(r);
+        console.log('[LOAD] Dati locali caricati:', NURSES.length, 'infermiere,', Object.keys(schedule).length, 'turni in schedule');
+        console.log('[LOAD] NURSES IDs:', NURSES.map(n => `"${n.id}"`).join(', '));
     } catch(e) { console.error('Erro ao carregar dados locais', e); }
 }
 
@@ -397,7 +459,11 @@ function showTab(tab, btn) {
     document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
     document.getElementById(tab+'Tab').classList.add('active');
     btn.classList.add('active');
-    if (tab==='reports') renderReports();
+    if (tab==='reports') {
+        // Sincroniza o mês do report com o calendário ao abrir a tab
+        reportMonthDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
+        renderReports();
+    }
     if (tab==='requests') {
         const now = Date.now();
         if (now - _lastReqSync > 60000) { // só sincroniza se passaram mais de 60s
@@ -493,38 +559,57 @@ async function syncScheduleFromCloud() {
     try {
         const pTxt = document.getElementById('cloudStatusText');
         if(pTxt) pTxt.textContent = 'Sincronizzando...';
-        
+
         const m = currentMonth.getMonth(); // 0 a 11 base JS
         const y = currentMonth.getFullYear();
 
         const dbRes = await fetchGoogleDB('read', 'Escala');
         if (dbRes && dbRes.status === 'success' && dbRes.data) {
             let loaded = 0;
-            const sheetMonthValue = String(m + 1); // 1 a 12 base Sheets Visual
-            
-            const maxDays = new Date(y, m + 1, 0).getDate(); // Dias reais do mês
-            dbRes.data.forEach(row => {
-                if (String(row.month) === sheetMonthValue && String(row.year) === String(y)) {
-                    // Valida que nurseId existe no sistema antes de carregar
-                    if (!NURSES.find(n => n.id === row.nurseId)) return;
-                    for (let d = 1; d <= maxDays; d++) { // Só dias válidos do mês, sem overflow
-                        let shiftCode = row['d' + d];
-                        if (shiftCode && SHIFTS[shiftCode]) { // Valida código de turno
-                            schedule[`${row.nurseId}_${m}_${y}_${d}`] = shiftCode;
+            const targetMonth = String(m + 1); // 1 a 12 base Sheets Visual
+
+            console.log(`[SYNC] Escala: ${dbRes.data.length} righe totali dal cloud`);
+
+            // Abordagem idêntica ao Mobile: sem filtros restritivos, carrega tudo
+            dbRes.data.forEach((row, idx) => {
+                // Normaliza todos os campos para string (Sheets pode retornar números)
+                const rowMonth = String(row.month ?? '').trim();
+                const rowYear  = String(row.year ?? '').trim();
+                const rowNurse = String(row.nurseId ?? '').trim();
+
+                if (!rowNurse || rowNurse === 'undefined' || rowNurse === '') return;
+
+                if (rowMonth === targetMonth && rowYear === String(y)) {
+                    console.log(`[SYNC] Riga ${idx+2}: nurseId="${rowNurse}" month=${rowMonth} year=${rowYear}`);
+
+                    for (let d = 1; d <= 31; d++) {
+                        const val = row['d' + d];
+                        const shiftCode = String(val ?? '').trim();
+                        // Carrega qualquer valor não-vazio (idêntico ao Mobile)
+                        if (shiftCode && shiftCode !== '' && shiftCode !== 'undefined') {
+                            schedule[`${rowNurse}_${m}_${y}_${d}`] = shiftCode;
                             loaded++;
                         }
                     }
                 }
             });
+
+            console.log(`[SYNC] ${loaded} turni caricati dal cloud per ${targetMonth}/${y}`);
+
+            // SEMPRE re-renderiza e salva após sync, mesmo que loaded=0
+            // (garante que dados do cloud prevaleçam sobre dados locais stale)
+            saveData();
+            renderCalendar();
+
             if (loaded > 0) {
-                saveData();
-                renderCalendar();
-                toast(`☁️ Turni del mese scaricati in base al cloud!`, 'info', 2000);
+                toast(`☁️ Turni del mese scaricati dal cloud!`, 'info', 2000);
             }
             if(pTxt) pTxt.textContent = 'App Sincronizzato';
+        } else {
+            console.warn('[SYNC] Nessuna risposta valida dal cloud:', dbRes);
         }
     } catch (e) {
-        console.error("Errore download turni", e);
+        console.error("[SYNC] Errore download turni:", e);
     }
 }
 
@@ -548,9 +633,9 @@ function renderCalendar() {
     const hdRow = document.getElementById('calendarDays');
     let headerHtml = `<th class="nurse-cell">Infermiera</th>`;
     for (let d=1; d<=days; d++) {
-        const wk = isWeekend(currentMonth, d);
+        const fest = isFestivo(currentMonth, d);
         const dow = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), d).getDay();
-        headerHtml += `<th class="${wk?'wkend':''}">
+        headerHtml += `<th class="${fest?'wkend':''}">
             <div class="day-num">${d}</div>
             <div class="day-lbl">${dayNames[dow]}</div>
         </th>`;
@@ -562,7 +647,18 @@ function renderCalendar() {
     tbody.innerHTML = '';
     
     const displayNurses = getMonthlyNurses();
-    
+
+    // Debug: mostra dados de schedule para cada enfermeira
+    const m = currentMonth.getMonth(), y = currentMonth.getFullYear();
+    displayNurses.forEach(n => {
+        const shifts = [];
+        for (let d = 1; d <= days; d++) {
+            const k = `${String(n.id).trim()}_${m}_${y}_${d}`;
+            if (schedule[k] && schedule[k] !== 'OFF') shifts.push(`d${d}=${schedule[k]}`);
+        }
+        console.log(`[CAL] ${n.id} (${n.name}): ${shifts.length > 0 ? shifts.join(', ') : 'NESSUN TURNO'}`);
+    });
+
     displayNurses.forEach((nurse, idx) => {
         const tr = document.createElement('tr');
         tr.draggable = true;
@@ -1203,8 +1299,10 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         // Fase: Diurna e Plantões Mistos
         for (let d = startDay; d <= simDays; d++) {
             const dow = new Date(y, m, d).getDay();
-            const wk = dow === 0 || dow === 6;
+            const monthRef = new Date(y, m, 1);
+            const festivo = isFestivo(monthRef, d);
 
+            // Espelhamento Domingo: copia turno de sábado para domingo
             if (dow === 0 && d > 1) {
                 NURSES.forEach(n => {
                     const satShift = getSh(tSched, n.id, d-1);
@@ -1218,8 +1316,8 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
             }
 
             let targets;
-            if (wk) {
-                targets = ['MF', 'PF'];  // Weekend: 2 day shifts + N = 3
+            if (festivo) {
+                targets = ['MF', 'PF'];  // Festivo (weekend/holiday): 2 day shifts + N = 3
             } else {
                 // Weekday: always M1 + P + exactly ONE of G or M2 = 3 day shifts
                 // Distribuição inteligente: alterna G/M2 com randomização ponderada
@@ -1280,13 +1378,12 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                         let gm2Bias = 0;
                         if (t === 'G') gm2Bias = (nurseGM2Count[n.id]?.g || 0) * 12;
                         if (t === 'M2') gm2Bias = (nurseGM2Count[n.id]?.m2 || 0) * 12;
-                        // Penalidade de fim de semana: favorecer quem trabalhou menos fins de semana
+                        // Penalidade de festivo: favorecer quem trabalhou menos festivos
                         let wkBias = 0;
-                        if (wk) {
+                        if (festivo) {
                             let wkCount = 0;
                             for (let wd = 1; wd < d; wd++) {
-                                const wdow = new Date(y, m, wd).getDay();
-                                if ((wdow === 0 || wdow === 6) && getSh(tSched, n.id, wd) && !['OFF','FE','AT'].includes(getSh(tSched, n.id, wd))) wkCount++;
+                                if (isFestivo(monthRef, wd) && getSh(tSched, n.id, wd) && !['OFF','FE','AT'].includes(getSh(tSched, n.id, wd))) wkCount++;
                             }
                             wkBias = wkCount * 15;
                         }
@@ -1318,6 +1415,7 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         let weekendPenalty = 0;
         let postNightViolations = 0;
         let gm2BalancePenalty = 0;
+        const monthRefFit = new Date(y, m, 1);
 
         NURSES.forEach(n => {
             let h = nurseHoursTemp(tSched, n.id);
@@ -1335,16 +1433,15 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
             }
             repScore += cons;
 
-            // 2. Equilíbrio de fins de semana trabalhados por enfermeira
+            // 2. Equilíbrio de festivos trabalhados por enfermeira (weekends + feriados italianos)
             let wkendWorked = 0;
             for (let dd = 1; dd <= days; dd++) {
-                const ddow = new Date(y, m, dd).getDay();
-                if (ddow === 0 || ddow === 6) {
+                if (isFestivo(monthRefFit, dd)) {
                     const s = getSh(tSched, n.id, dd);
                     if (s && !['OFF','FE','AT'].includes(s)) wkendWorked++;
                 }
             }
-            // Penaliza se uma enfermeira trabalha mais de 4 dias de fim de semana ou 0
+            // Penaliza se uma enfermeira trabalha muitos ou nenhum festivo
             if (wkendWorked > 4) weekendPenalty += (wkendWorked - 4) * 3000;
             if (wkendWorked === 0) weekendPenalty += 2000;
 
@@ -1371,8 +1468,7 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         // 5. Penalizar dias úteis do mês real que ficaram com < 3 turnos diurnos preenchidos
         let incompleteDays = 0;
         for (let dd = 1; dd <= days; dd++) {
-            const ddow = new Date(y, m, dd).getDay();
-            if (ddow === 0 || ddow === 6) continue;
+            if (isFestivo(monthRefFit, dd)) continue; // Pula festivos (weekends + feriados)
             let filledCount = 0;
             NURSES.forEach(n => {
                 const s = getSh(tSched, n.id, dd);
@@ -1680,11 +1776,10 @@ function openDayModal(nurseId, day) {
 function directChangeShift(code) {
     if(!isCoordinator || !selectedCell) return;
     
-    // Strict Business Rule check: Only N, MF, PF, OFF, FE, AT on weekends
+    // Strict Business Rule check: Only N, MF, PF, OFF, FE, AT on festivi (weekends + holidays)
     const d = selectedCell.day;
-    const dow = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), d).getDay();
-    if ((dow === 0 || dow === 6) && ['M1','M2','P','G'].includes(code)) {
-        toast('Attenzione: Nei fine settimana sono permessi solo turni Festivi (MF, PF) o Notte (N)!', 'error');
+    if (isFestivo(currentMonth, d) && ['M1','M2','P','G'].includes(code)) {
+        toast('Attenzione: Nei giorni festivi sono permessi solo turni Festivi (MF, PF) o Notte (N)!', 'error');
         return;
     }
     
@@ -2327,18 +2422,76 @@ function updateBadge() {
     }
 }
 
+// ── REPORTS NAV ──────────────────────────────────────────────
+function changeReportMonth(dir) {
+    reportMonthDate = new Date(reportMonthDate.getFullYear(), reportMonthDate.getMonth() + dir, 1);
+    // Carrega dados do cloud para o mês selecionado, se necessário
+    loadReportMonthData().then(() => renderReports());
+}
+
+async function loadReportMonthData() {
+    const m = reportMonthDate.getMonth();
+    const y = reportMonthDate.getFullYear();
+    // Verifica se já temos dados para este mês
+    const hasData = NURSES.some(n => {
+        const shift = schedule[`${String(n.id).trim()}_${m}_${y}_1`];
+        return shift && shift !== 'OFF';
+    });
+    if (hasData) return; // Já temos dados
+
+    // Tenta baixar do cloud
+    try {
+        const dbRes = await fetchGoogleDB('read', 'Escala');
+        if (dbRes && dbRes.status === 'success' && dbRes.data) {
+            const sheetMonthValue = String(m + 1);
+            const maxDays = new Date(y, m + 1, 0).getDate();
+            dbRes.data.forEach(row => {
+                const rowMonth = String(row.month || '').trim();
+                const rowYear  = String(row.year || '').trim();
+                const rowNurse = String(row.nurseId || '').trim();
+                if (rowMonth === sheetMonthValue && rowYear === String(y)) {
+                    if (!NURSES.find(n => String(n.id).trim() === rowNurse)) return;
+                    for (let d = 1; d <= maxDays; d++) {
+                        let shiftCode = String(row['d' + d] || '').trim();
+                        if (shiftCode && shiftCode !== '' && shiftCode !== 'undefined') {
+                            schedule[`${rowNurse}_${m}_${y}_${d}`] = shiftCode;
+                        }
+                    }
+                }
+            });
+            saveData();
+        }
+    } catch (e) {
+        console.warn('[REPORT] Errore download turni per mese report:', e);
+    }
+}
+
 // ── REPORTS RENDER — DASHBOARD COMPLETO (COORDINATRICE + INFERMIERE) ──────
+function toggleReportView(mode) {
+    reportViewMode = mode;
+    renderReports();
+}
+
 function renderReports() {
     if (!currentUser) return;
+    if (reportViewMode === 'annual') { renderAnnualReport(); return; }
+    renderMonthlyReport();
+}
 
-    const daysInMo = daysInMonth(currentMonth);
-    const m = currentMonth.getMonth();
-    const y = currentMonth.getFullYear();
+function renderMonthlyReport() {
+    const refMonth = reportMonthDate;
+    const daysInMo = new Date(refMonth.getFullYear(), refMonth.getMonth() + 1, 0).getDate();
+    const m = refMonth.getMonth();
+    const y = refMonth.getFullYear();
     const months = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
     const monthLabel = `${months[m]} ${y}`;
 
     // Seleção de enfermeiras: coordenadora vê todas, enfermeira vê só a dela
-    const displayNurses = isCoordinator ? getMonthlyNurses() : [NURSES.find(n => n.id === currentUser.id)].filter(Boolean);
+    const monthKey = `${m}_${y}`;
+    const orderForMonth = monthlyOrder[monthKey] || NURSES.map(n => n.id);
+    const displayNurses = isCoordinator
+        ? orderForMonth.map(id => NURSES.find(n => n.id === id)).filter(Boolean)
+        : [NURSES.find(n => n.id === currentUser.id)].filter(Boolean);
 
     if (displayNurses.length === 0) {
         document.getElementById('reportsTab').innerHTML = `<div class="empty-state" style="padding:80px"><div class="empty-icon">📊</div><p>Nessun personale attivo questo mese.</p></div>`;
@@ -2350,15 +2503,42 @@ function renderReports() {
     let teamAbsences = 0, teamVacations = 0;
     const nurseData = [];
 
+    const monthRef = new Date(y, m, 1);
+    // Ore Dovute: dias úteis (non-festivi) × 7.5h (standard contrattuale italiano)
+    let giorniFeriali = 0;
+    for (let d = 1; d <= daysInMo; d++) { if (!isFestivo(monthRef, d)) giorniFeriali++; }
+    const oreDovute = giorniFeriali * 7.5;
+
+    // Copertura giornaliera (quanti turni attivi per giorno)
+    const dailyCoverage = [];
+    for (let d = 1; d <= daysInMo; d++) {
+        const fest = isFestivo(monthRef, d);
+        let count = 0;
+        const dayShifts = {};
+        displayNurses.forEach(n => {
+            const code = getShiftForMonth(n.id, d, m, y);
+            if (code && !['OFF','FE','AT'].includes(code)) {
+                count++;
+                dayShifts[code] = (dayShifts[code] || 0) + 1;
+            }
+        });
+        const expected = fest ? 3 : 4;
+        dailyCoverage.push({ day: d, count, expected, fest, shifts: dayShifts });
+    }
+
     displayNurses.forEach(n => {
         let totalH = 0, workDays = 0, restDays = 0, nightCount = 0;
         let feCount = 0, atCount = 0, offCount = 0;
         const shiftCounts = {};
         let weekendsWorked = 0;
         const weekendSet = new Set();
+        // Breakdown ore: diurno/notturno × feriale/festivo
+        let oreDiurneFeriali = 0, oreDiurneFestive = 0;
+        let oreNotturneFeriali = 0, oreNotturneFestive = 0;
+        let oreFerie = 0, oreMalattia = 0;
 
         for (let d = 1; d <= daysInMo; d++) {
-            const code = getShift(n.id, d);
+            const code = getShiftForMonth(n.id, d, m, y);
             const sh = SHIFTS[code];
             if (!sh) continue;
 
@@ -2366,16 +2546,24 @@ function renderReports() {
             shiftCounts[code] = (shiftCounts[code] || 0) + 1;
 
             if (['OFF'].includes(code)) { offCount++; restDays++; }
-            else if (code === 'FE') { feCount++; restDays++; }
-            else if (code === 'AT') { atCount++; restDays++; }
+            else if (code === 'FE') { feCount++; restDays++; oreFerie += 7.5; }
+            else if (code === 'AT') { atCount++; restDays++; oreMalattia += 7.5; }
             else { workDays++; }
             if (code === 'N') nightCount++;
 
-            // Fins de semana trabalhados
-            const dow = new Date(y, m, d).getDay();
-            if ((dow === 0 || dow === 6) && !['OFF','FE','AT'].includes(code)) {
-                const sundayRef = d + (dow === 6 ? 1 : 0);
-                weekendSet.add(sundayRef);
+            // Breakdown ore diurne/notturne × feriali/festive
+            const fest = isFestivo(monthRef, d);
+            if (code === 'N') {
+                if (fest) oreNotturneFestive += sh.h;
+                else oreNotturneFeriali += sh.h;
+            } else if (!['OFF','FE','AT'].includes(code)) {
+                if (fest) oreDiurneFestive += sh.h;
+                else oreDiurneFeriali += sh.h;
+            }
+
+            // Festivos trabalhados (weekends + feriados italianos)
+            if (fest && !['OFF','FE','AT'].includes(code)) {
+                weekendSet.add(d);
             }
         }
         weekendsWorked = weekendSet.size;
@@ -2389,7 +2577,9 @@ function renderReports() {
 
         nurseData.push({
             nurse: n, totalH, workDays, restDays, nightCount,
-            feCount, atCount, offCount, shiftCounts, weekendsWorked
+            feCount, atCount, offCount, shiftCounts, weekendsWorked,
+            oreDiurneFeriali, oreDiurneFestive, oreNotturneFeriali, oreNotturneFestive,
+            oreFerie, oreMalattia, oreDovute, differenza: totalH - oreDovute
         });
     });
 
@@ -2421,7 +2611,17 @@ function renderReports() {
     <div class="reports-wrap" style="max-width:1200px;">
         <div class="rpt-header">
             <h2>📊 Dashboard Operativo</h2>
-            <span class="rpt-month">${monthLabel}</span>
+            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div class="rpt-view-toggle">
+                    <button class="rpt-toggle-btn ${reportViewMode==='monthly'?'active':''}" onclick="toggleReportView('monthly')">Mensile</button>
+                    <button class="rpt-toggle-btn ${reportViewMode==='annual'?'active':''}" onclick="toggleReportView('annual')">Annuale</button>
+                </div>
+                <div class="rpt-month-nav">
+                    <button class="rpt-nav-btn" onclick="changeReportMonth(-1)" title="Mese precedente">◀</button>
+                    <span class="rpt-month">${monthLabel}</span>
+                    <button class="rpt-nav-btn" onclick="changeReportMonth(1)" title="Mese successivo">▶</button>
+                </div>
+            </div>
         </div>
 
         <!-- KPI Cards -->
@@ -2493,7 +2693,7 @@ function renderReports() {
                     <th>Notti</th>
                     <th>Ferie</th>
                     <th>Certif.</th>
-                    <th>Fine Sett.</th>
+                    <th>Festivi</th>
                     <th>Carico</th>
                 </tr></thead>
                 <tbody>
@@ -2563,6 +2763,272 @@ function renderReports() {
             </div>
         </div>
     </div>`;
+}
+
+// ── ANNUAL REPORT ────────────────────────────────────────────
+async function loadAnnualData(year) {
+    // Tenta carregar dados de todos os 12 meses do ano a partir do cloud
+    try {
+        const dbRes = await fetchGoogleDB('read', 'Escala');
+        if (dbRes && dbRes.status === 'success' && dbRes.data) {
+            let loaded = 0;
+            dbRes.data.forEach(row => {
+                const rowYear = String(row.year ?? '').trim();
+                const rowNurse = String(row.nurseId ?? '').trim();
+                const rowMonth = parseInt(String(row.month ?? '0').trim());
+                if (!rowNurse || rowYear !== String(year) || rowMonth < 1 || rowMonth > 12) return;
+                const m = rowMonth - 1; // JS month (0-11)
+                for (let d = 1; d <= 31; d++) {
+                    const val = row['d' + d];
+                    const shiftCode = String(val ?? '').trim();
+                    if (shiftCode && shiftCode !== '' && shiftCode !== 'undefined') {
+                        schedule[`${rowNurse}_${m}_${year}_${d}`] = shiftCode;
+                        loaded++;
+                    }
+                }
+            });
+            if (loaded > 0) saveData();
+            console.log(`[ANNUAL] ${loaded} turni caricati per anno ${year}`);
+        }
+    } catch (e) {
+        console.warn('[ANNUAL] Errore caricamento dati annuali:', e);
+    }
+}
+
+function renderAnnualReport() {
+    if (!currentUser) return;
+
+    const y = reportMonthDate.getFullYear();
+    const months = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+    const displayNurses = isCoordinator ? NURSES : [NURSES.find(n => n.id === currentUser.id)].filter(Boolean);
+
+    if (displayNurses.length === 0) {
+        document.getElementById('reportsTab').innerHTML = `<div class="empty-state" style="padding:80px"><div class="empty-icon">📊</div><p>Nessun personale attivo.</p></div>`;
+        return;
+    }
+
+    // Coleta dados por enfermeira por mês
+    const nurseAnnual = [];
+    let grandTotalH = 0, grandWorkDays = 0, grandRestDays = 0, grandNights = 0;
+
+    displayNurses.forEach(n => {
+        let annualH = 0, annualWork = 0, annualRest = 0, annualNights = 0;
+        let annualFE = 0, annualAT = 0, annualOFF = 0, annualWeekends = 0;
+        const monthlyH = [];
+        const annualShiftCounts = {};
+
+        for (let mo = 0; mo < 12; mo++) {
+            const daysInMo = new Date(y, mo + 1, 0).getDate();
+            let moH = 0, moWork = 0, moRest = 0, moNights = 0;
+            const weekendSet = new Set();
+
+            for (let d = 1; d <= daysInMo; d++) {
+                const code = getShiftForMonth(n.id, d, mo, y);
+                const sh = SHIFTS[code];
+                if (!sh) continue;
+                moH += sh.h;
+                annualShiftCounts[code] = (annualShiftCounts[code] || 0) + 1;
+
+                if (code === 'OFF') { moRest++; annualOFF++; }
+                else if (code === 'FE') { moRest++; annualFE++; }
+                else if (code === 'AT') { moRest++; annualAT++; }
+                else { moWork++; }
+                if (code === 'N') { moNights++; }
+
+                if (isFestivo(new Date(y, mo, 1), d) && !['OFF','FE','AT'].includes(code)) {
+                    weekendSet.add(d);
+                }
+            }
+            annualWeekends += weekendSet.size;
+            annualH += moH; annualWork += moWork; annualRest += moRest; annualNights += moNights;
+            monthlyH.push(moH);
+        }
+
+        grandTotalH += annualH; grandWorkDays += annualWork; grandRestDays += annualRest; grandNights += annualNights;
+        nurseAnnual.push({
+            nurse: n, annualH, annualWork, annualRest, annualNights,
+            annualFE, annualAT, annualOFF, annualWeekends, monthlyH, annualShiftCounts
+        });
+    });
+
+    const avgH = displayNurses.length > 0 ? (grandTotalH / displayNurses.length).toFixed(1) : '0.0';
+    const maxH = Math.max(...nurseAnnual.map(nd => nd.annualH));
+    const minH = Math.min(...nurseAnnual.map(nd => nd.annualH));
+
+    const tab = document.getElementById('reportsTab');
+    tab.innerHTML = `
+    <div class="reports-wrap" style="max-width:1200px;">
+        <div class="rpt-header">
+            <h2>📊 Dashboard Operativo</h2>
+            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div class="rpt-view-toggle">
+                    <button class="rpt-toggle-btn ${reportViewMode==='monthly'?'active':''}" onclick="toggleReportView('monthly')">Mensile</button>
+                    <button class="rpt-toggle-btn ${reportViewMode==='annual'?'active':''}" onclick="toggleReportView('annual')">Annuale</button>
+                </div>
+                <div class="rpt-month-nav">
+                    <button class="rpt-nav-btn" onclick="changeReportYear(-1)" title="Anno precedente">◀</button>
+                    <span class="rpt-month">Anno ${y}</span>
+                    <button class="rpt-nav-btn" onclick="changeReportYear(1)" title="Anno successivo">▶</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- KPI Annuali -->
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px,1fr));">
+            <div class="stat-card stat-primary">
+                <div class="stat-lbl">Ore Totali Anno</div>
+                <div class="stat-val" style="font-size:28px;">${grandTotalH.toFixed(1)}h</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">Media: ${avgH}h/persona</div>
+            </div>
+            <div class="stat-card stat-success">
+                <div class="stat-lbl">Giorni Lavorati</div>
+                <div class="stat-val" style="font-size:28px;">${grandWorkDays}</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">Riposo: ${grandRestDays}</div>
+            </div>
+            <div class="stat-card stat-night">
+                <div class="stat-lbl">Turni Notturni</div>
+                <div class="stat-val" style="font-size:28px;">${grandNights}</div>
+            </div>
+            <div class="stat-card stat-warning">
+                <div class="stat-lbl">Dispersione Ore</div>
+                <div class="stat-val" style="font-size:28px;">${(maxH - minH).toFixed(1)}h</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">Max-Min annuale</div>
+            </div>
+        </div>
+
+        <!-- Ranking Anual -->
+        <div class="report-section">
+            <h3>⏱ Ranking Ore Annuale per Infermiera</h3>
+            <table class="rpt-table">
+                <thead><tr>
+                    <th style="text-align:left">Infermiera</th>
+                    <th>Ore Anno</th>
+                    <th>Lavorati</th>
+                    <th>Riposo</th>
+                    <th>Notti</th>
+                    <th>Ferie</th>
+                    <th>Certif.</th>
+                    <th>Festivi</th>
+                    <th>Carico</th>
+                </tr></thead>
+                <tbody>
+                ${nurseAnnual.sort((a,b) => b.annualH - a.annualH).map((nd, idx) => {
+                    const pct = maxH > 0 ? ((nd.annualH / maxH) * 100).toFixed(0) : 0;
+                    const barColor = nd.annualH >= maxH ? 'var(--danger)' : nd.annualH <= minH ? 'var(--success)' : 'var(--primary)';
+                    return `<tr>
+                        <td style="text-align:left"><strong>${idx+1}.</strong> ${nd.nurse.name}</td>
+                        <td><strong>${nd.annualH.toFixed(1)}h</strong></td>
+                        <td>${nd.annualWork}</td>
+                        <td>${nd.annualRest}</td>
+                        <td>${nd.annualNights}</td>
+                        <td>${nd.annualFE}</td>
+                        <td>${nd.annualAT}</td>
+                        <td>${nd.annualWeekends}</td>
+                        <td style="min-width:120px;">
+                            <div style="background:rgba(255,255,255,0.06); border-radius:99px; height:8px; overflow:hidden;">
+                                <div style="width:${pct}%; height:100%; background:${barColor}; border-radius:99px; transition:width 0.6s;"></div>
+                            </div>
+                        </td>
+                    </tr>`;
+                }).join('')}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Ore per Mese (Trend) -->
+        <div class="report-section">
+            <h3>📈 Ore per Mese — Trend Annuale</h3>
+            <div style="overflow-x:auto;">
+            <table class="rpt-table">
+                <thead><tr>
+                    <th style="text-align:left">Infermiera</th>
+                    ${months.map((mo, i) => `<th style="font-size:11px;">${mo.substring(0,3)}</th>`).join('')}
+                    <th><strong>TOT</strong></th>
+                </tr></thead>
+                <tbody>
+                ${nurseAnnual.map(nd => `<tr>
+                    <td style="text-align:left">${nd.nurse.name}</td>
+                    ${nd.monthlyH.map(h => {
+                        const opacity = h > 0 ? '1' : '0.25';
+                        return `<td style="font-weight:${h > 0 ? '700' : '400'}; opacity:${opacity}; font-size:12px;">${h > 0 ? h.toFixed(0) : '—'}</td>`;
+                    }).join('')}
+                    <td><strong>${nd.annualH.toFixed(0)}h</strong></td>
+                </tr>`).join('')}
+                </tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- Distribuição de Turnos Anual -->
+        <div class="report-section">
+            <h3>🔄 Distribuzione Turni Annuale</h3>
+            <div style="overflow-x:auto;">
+            <table class="rpt-table">
+                <thead><tr>
+                    <th style="text-align:left">Infermiera</th>
+                    ${['M1','M2','MF','G','P','PF','N','OFF','FE','AT'].map(c =>
+                        `<th><span style="display:inline-block; width:10px; height:10px; border-radius:3px; background:${SHIFTS[c].color}; margin-right:4px; vertical-align:middle;"></span>${c}</th>`
+                    ).join('')}
+                </tr></thead>
+                <tbody>
+                ${nurseAnnual.map(nd => `<tr>
+                    <td style="text-align:left">${nd.nurse.name}</td>
+                    ${['M1','M2','MF','G','P','PF','N','OFF','FE','AT'].map(c => {
+                        const val = nd.annualShiftCounts[c] || 0;
+                        return `<td style="font-weight:${val > 0 ? '700' : '400'}; opacity:${val > 0 ? '1' : '0.3'};">${val}</td>`;
+                    }).join('')}
+                </tr>`).join('')}
+                </tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- Quota Noturna Anual -->
+        <div class="report-section">
+            <h3>🌙 Quota Notturna Annuale</h3>
+            <div style="display:grid; gap:12px;">
+            ${nurseAnnual.map(nd => {
+                const annualQuota = (nd.nurse.nightQuota || 5) * 12;
+                const pct = Math.min((nd.annualNights / annualQuota) * 100, 100).toFixed(0);
+                const color = nd.annualNights > annualQuota ? 'var(--danger)' : nd.annualNights >= annualQuota * 0.9 ? 'var(--warning)' : 'var(--primary)';
+                return `<div style="display:flex; align-items:center; gap:12px;">
+                    <span style="min-width:140px; font-size:13px; font-weight:600; color:var(--text-2);">${nd.nurse.name}</span>
+                    <div style="flex:1; background:rgba(255,255,255,0.06); border-radius:99px; height:10px; overflow:hidden;">
+                        <div style="width:${pct}%; height:100%; background:${color}; border-radius:99px; transition:width 0.6s;"></div>
+                    </div>
+                    <span style="min-width:60px; text-align:right; font-size:13px; font-weight:700; color:${color};">${nd.annualNights}/${annualQuota}</span>
+                </div>`;
+            }).join('')}
+            </div>
+        </div>
+    </div>`;
+
+    // Carrega dados do cloud para meses que faltam
+    loadAnnualData(y).then(() => {
+        // Verifica se novos dados foram carregados e re-renderiza se necessário
+        let hasNewData = false;
+        for (let mo = 0; mo < 12; mo++) {
+            if (NURSES.some(n => {
+                const shift = schedule[`${String(n.id).trim()}_${mo}_${y}_1`];
+                return shift && shift !== 'OFF';
+            })) { hasNewData = true; break; }
+        }
+        // Re-renderiza somente se o report anual está ativo e dados mudaram
+        if (hasNewData && reportViewMode === 'annual') {
+            // Evita loop: só re-renderiza uma vez marcando flag
+            if (!renderAnnualReport._loaded) {
+                renderAnnualReport._loaded = true;
+                renderAnnualReport();
+                setTimeout(() => { renderAnnualReport._loaded = false; }, 5000);
+            }
+        }
+    });
+}
+
+function changeReportYear(dir) {
+    reportMonthDate = new Date(reportMonthDate.getFullYear() + dir, reportMonthDate.getMonth(), 1);
+    renderAnnualReport._loaded = false;
+    renderReports();
 }
 
 // ── INIT ──────────────────────────────────────────────────────
