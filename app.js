@@ -293,6 +293,9 @@ async function publishToCloud() {
             status: r.status,
             nurseId: r.nurseId || r.fromNurseId || '',
             nurseName: r.nurseName || r.fromNurseName || '',
+            nursecambio: r.nursecambio || r.toNurseName || r.swapNurseName || '',
+            nurseIdcambio: r.nurseIdcambio || r.swapNurseId || r.toNurseId || '',
+            swapNurseId: r.swapNurseId || r.toNurseId || '',
             startDate: r.startDate || r.date || '',
             endDate: r.endDate || r.startDate || r.date || '',
             desc: r.desc || r.reason || '',
@@ -509,6 +512,9 @@ async function syncRequestsFromCloud() {
                     // Sanitiza datas vindas do cloud: Google Sheets pode retornar
                     // "2026-05-23T03:00:00Z" — o split('T')[0] garante "2026-05-23"
                     const rawDate = sanitizeDate(cr.startDate || cr.date || '');
+                    // Mapeia os campos 'nursecambio' e 'nurseIdcambio' do Google Sheets para os campos internos do app
+                    const swapNurseName = cr.nursecambio || cr.swapNurseName || cr.toNurseName || '';
+                    const swapNurseId = cr.nurseIdcambio || cr.swapNurseId || cr.toNurseId || '';
                     updatedRequests.push({
                         id: crId,
                         type: cr.type || 'OFF',
@@ -517,6 +523,12 @@ async function syncRequestsFromCloud() {
                         fromNurseId: cr.nurseId || '',
                         nurseName: cr.nurseName || '',
                         fromNurseName: cr.nurseName || '',
+                        toNurseName: swapNurseName,
+                        swapNurseName: swapNurseName,
+                        nursecambio: swapNurseName,
+                        nurseIdcambio: swapNurseId,
+                        swapNurseId: swapNurseId,
+                        toNurseId: swapNurseId,
                         startDate: rawDate,
                         date: rawDate,
                         endDate: sanitizeDate(cr.endDate || ''),
@@ -2081,12 +2093,17 @@ function submitSwapRequest() {
         renderCalendar();
     }
 
+    const swapDateStr = document.getElementById('swapDateInput').value;
     requests.push({
         id: generateId(), type:'swap', status: st,
         fromNurseId: selectedCell.nurseId, fromNurseName: currentUser.name,
         fromDay: selectedCell.day, fromShift,
         toNurseId: nurseId, toNurseName: toNurse.name,
-        toDay, toShift, createdAt: new Date().toISOString(),
+        nursecambio: toNurse.name, swapNurseName: toNurse.name,
+        swapNurseId: nurseId,
+        toDay, toShift,
+        startDate: swapDateStr, date: swapDateStr,
+        createdAt: new Date().toISOString(),
         approvedAt: st === 'approved' ? new Date().toISOString() : null, 
         approvedBy: st === 'approved' ? 'Coordenadora' : null
     });
@@ -2406,6 +2423,8 @@ async function appendRequestToCloud(req) {
         const reqRow = {
             id: String(req.id), type: req.type, status: req.status,
             nurseId: req.nurseId || req.fromNurseId || '', nurseName: req.nurseName || req.fromNurseName || '',
+            nursecambio: req.nursecambio || req.toNurseName || req.swapNurseName || '',
+            nurseIdcambio: req.nurseIdcambio || req.swapNurseId || req.toNurseId || '',
             startDate: req.startDate || req.date || '', endDate: req.endDate || req.startDate || req.date || '',
             desc: req.desc || req.reason || '',
             swapNurseId: req.toNurseId || req.swapNurseId || '',
@@ -2431,9 +2450,22 @@ async function appendRequestToCloud(req) {
 function getReqDetails(req) {
     let h = `<div class="req-detail-row"><span class="req-detail-icon">👤</span><strong>${req.nurseName||req.fromNurseName}</strong></div>`;
     if (req.type==='swap') {
-        const fromShiftName = SHIFTS[req.fromShift]?.name || req.fromShift || '—';
-        const toShiftName = SHIFTS[req.toShift]?.name || req.toShift || '—';
-        h += `<div class="req-detail-row"><span class="req-detail-icon">🔄</span><span>${fromShiftName} ➔ ${req.toNurseName || '—'} (${toShiftName})</span></div>`;
+        // Nome da enfermeira de câmbio: prioriza nursecambio (coluna do Sheets), depois fallbacks internos
+        const cambioName = req.nursecambio || req.toNurseName || req.swapNurseName || '—';
+        const fromShiftName = SHIFTS[req.fromShift]?.name || req.fromShift || '';
+        const toShiftName = SHIFTS[req.toShift]?.name || req.toShift || '';
+        // Data da troca: exibe a data da solicitação de câmbio
+        const swapDateRaw = sanitizeDate(req.startDate || req.date || '');
+        const swapDateDisplay = swapDateRaw ? swapDateRaw.split('-').reverse().join('/') : '';
+        // Monta a linha de detalhes do câmbio
+        let swapDetail = `<div class="req-detail-row"><span class="req-detail-icon">🔄</span><span>Cambio con: <strong>${cambioName}</strong></span></div>`;
+        if (swapDateDisplay) {
+            swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">📅</span><span>${swapDateDisplay}</span></div>`;
+        }
+        if (fromShiftName && toShiftName) {
+            swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">🔃</span><span>${fromShiftName} ➔ ${toShiftName}</span></div>`;
+        }
+        h += swapDetail;
     } else if (req.type==='vacation' || req.type==='FE' || req.type==='AT' || req.type==='OFF' || req.type==='OFF_INJ') {
         const rawStart = sanitizeDate(req.startDate || req.date || '');
         const rawEnd   = sanitizeDate(req.endDate || rawStart);
@@ -2466,6 +2498,9 @@ async function syncAllRequestsToCloud() {
             status: r.status,
             nurseId: r.nurseId || r.fromNurseId || '',
             nurseName: r.nurseName || r.fromNurseName || '',
+            nursecambio: r.nursecambio || r.toNurseName || r.swapNurseName || '',
+            nurseIdcambio: r.nurseIdcambio || r.swapNurseId || r.toNurseId || '',
+            swapNurseId: r.swapNurseId || r.toNurseId || '',
             startDate: r.startDate || r.date || '',
             endDate: r.endDate || r.startDate || r.date || '',
             desc: r.desc || r.reason || '',
@@ -2810,20 +2845,10 @@ function renderMonthlyReport() {
     const coverageIssues = dailyCoverage.filter(dc => dc.count < dc.expected).length;
     const coverageRate = daysInMo > 0 ? (((daysInMo - coverageIssues) / daysInMo) * 100).toFixed(0) : '100';
 
-    // ── Build nurse filter dropdown (coordinator only) ──
-    const filterOptions = isCoordinator
-        ? `<option value="all" ${reportNurseFilter==='all'?'selected':''}>👥 Panoramica Team</option>` +
-          allNurses.map(n => `<option value="${n.id}" ${reportNurseFilter===n.id?'selected':''}>${n.name}</option>`).join('')
-        : '';
-
-    // ── Determine if individual or team view ──
-    const isIndividual = reportNurseFilter !== 'all' && isCoordinator;
-    const selectedNd = isIndividual ? nurseData.find(nd => nd.nurse.id === reportNurseFilter) : null;
-
     // ── RENDER HTML ──
     const tab = document.getElementById('reportsTab');
 
-    // ── HEADER (always shown) ──
+    // ── HEADER ──
     let html = `<div class="reports-wrap" style="max-width:1200px;">
         <div class="rpt-header">
             <h2>📊 Rapporto Operativo</h2>
@@ -2832,11 +2857,6 @@ function renderMonthlyReport() {
                     <button class="rpt-toggle-btn ${reportViewMode==='monthly'?'active':''}" onclick="toggleReportView('monthly')">Mensile</button>
                     <button class="rpt-toggle-btn ${reportViewMode==='annual'?'active':''}" onclick="toggleReportView('annual')">Annuale</button>
                 </div>
-                ${isCoordinator ? `<select class="rpt-nurse-filter" onchange="setReportNurseFilter(this.value)" style="
-                    background:var(--surface); color:var(--text); border:1px solid var(--border);
-                    border-radius:8px; padding:6px 12px; font-size:13px; font-weight:600;
-                    font-family:var(--font); cursor:pointer; min-width:180px;
-                ">${filterOptions}</select>` : ''}
                 <div class="rpt-month-nav">
                     <button class="rpt-nav-btn" onclick="changeReportMonth(-1)" title="Mese precedente">◀</button>
                     <span class="rpt-month">${monthLabel}</span>
@@ -2845,10 +2865,8 @@ function renderMonthlyReport() {
             </div>
         </div>`;
 
-    // ═══════════════════════════════════════════════════════════
-    // ── INDIVIDUAL NURSE VIEW ──
-    // ═══════════════════════════════════════════════════════════
-    if (isIndividual && selectedNd) {
+    // Individual view placeholder removed — reserved for mobile
+    if (false) {
         const nd = selectedNd;
         const nightQuota = nd.nurse.nightQuota || 5;
         const nightPct = Math.min((nd.nightCount / nightQuota) * 100, 100).toFixed(0);
@@ -3015,10 +3033,6 @@ function renderMonthlyReport() {
         </div>`;
 
     } else {
-    // ═══════════════════════════════════════════════════════════
-    // ── TEAM OVERVIEW (default) ──
-    // ═══════════════════════════════════════════════════════════
-
     // Executive summary narrative
     const coverStatus = coverageIssues === 0 ? '✅ completa' : `⚠️ ${coverageIssues} giorni scoperti`;
     const balanceStatus = parseFloat(hourSpread) < 10 ? '✅ equilibrata' : '⚠️ da riequilibrare';
@@ -3122,7 +3136,7 @@ function renderMonthlyReport() {
                 ${[...nurseData].sort((a,b) => b.totalH - a.totalH).map((nd, idx) => {
                     const pct = maxH > 0 ? ((nd.totalH / maxH) * 100).toFixed(0) : 0;
                     const barColor = nd.totalH >= maxH ? 'var(--danger)' : nd.totalH <= minH ? 'var(--success)' : 'var(--primary)';
-                    return `<tr style="cursor:pointer;" onclick="setReportNurseFilter('${nd.nurse.id}')" title="Clicca per analisi individuale">
+                    return `<tr>
                         <td style="text-align:left"><strong>${idx+1}.</strong> ${nd.nurse.name}</td>
                         <td><strong>${nd.totalH.toFixed(1)}h</strong></td>
                         <td>${nd.workDays}</td>
