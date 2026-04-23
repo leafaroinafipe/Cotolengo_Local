@@ -64,6 +64,7 @@ let monthlyOrder  = {}; // key: `${month}_${year}` → array of nurseIds
 let reportMonthDate = new Date(); // Período do relatório (independente do calendário)
 reportMonthDate.setDate(1);
 let reportViewMode = 'monthly'; // 'monthly' ou 'annual'
+let reportNurseFilter = 'all'; // 'all' ou nurseId para análise individual
 
 
 // ── UTILS ─────────────────────────────────────────────────────
@@ -425,6 +426,7 @@ function initApp() {
                     // Dispara a sincronização de turnos pendentes e requisições
                     await syncScheduleFromCloud();
                     await syncRequestsFromCloud();
+                    applyApprovedRequests(); // Auto-aplica requisições aprovadas na escala
                     renderRequests();
                     renderOccurrences();
                 } else {
@@ -537,11 +539,116 @@ async function syncRequestsFromCloud() {
                 requests = updatedRequests; // Replace entirely to drop ghost requests
                 saveData();
                 updateBadge();
+                applyApprovedRequests(); // Auto-aplica novas aprovações na escala
                 toast('☁️ Richieste sincronizzate e allineate col cloud', 'info');
             }
         }
     } catch (e) {
         console.warn('Sync cloud requests:', e);
+    }
+}
+
+// ── AUTO-APLICAÇÃO DE REQUISIÇÕES APROVADAS NA ESCALA ──────
+// Cruza requisições aprovadas com a escala existente.
+// Se uma requisição aprovada (FE, AT, OFF, vacation, justified, swap)
+// cai em um dia que já tem turno na escala, substitui automaticamente.
+// Isso garante que aprovações feitas DEPOIS da geração da escala
+// sejam refletidas sem intervenção manual.
+function applyApprovedRequests() {
+    const m = currentMonth.getMonth();
+    const y = currentMonth.getFullYear();
+    const days = daysInMonth(currentMonth);
+    let applied = 0;
+
+    requests.forEach(req => {
+        if (req.status !== 'approved') return;
+
+        // Requisições de ausência: FE, AT, OFF, vacation, justified, OFF_INJ
+        if (['FE', 'OFF', 'AT', 'OFF_INJ', 'vacation', 'justified'].includes(req.type)) {
+            let code = 'OFF';
+            if (req.type === 'FE' || req.type === 'vacation') code = 'FE';
+            else if (req.type === 'AT') code = 'AT';
+
+            const startStr = sanitizeDate(req.startDate || req.date || '');
+            const endStr = sanitizeDate(req.endDate || startStr);
+            if (!startStr) return;
+
+            const sDate = new Date(startStr + 'T00:00:00');
+            const eDate = new Date((endStr || startStr) + 'T00:00:00');
+
+            for (let d = 1; d <= days; d++) {
+                const checkDate = new Date(y, m, d);
+                checkDate.setHours(0,0,0,0); sDate.setHours(0,0,0,0); eDate.setHours(0,0,0,0);
+                if (checkDate >= sDate && checkDate <= eDate) {
+                    const currentShift = getShift(req.nurseId, d);
+                    // Só aplica se o dia ainda NÃO tem o código correto
+                    if (currentShift !== code) {
+                        assign(req.nurseId, d, code);
+                        applied++;
+                    }
+                }
+            }
+        }
+        // Requisições de troca (swap)
+        else if (req.type === 'swap') {
+            const swapDateStr = sanitizeDate(req.startDate || req.date || '');
+            if (!swapDateStr) return;
+            const swapDate = new Date(swapDateStr + 'T00:00:00');
+            if (swapDate.getMonth() !== m || swapDate.getFullYear() !== y) return;
+            const swapDay = swapDate.getDate();
+            if (swapDay < 1 || swapDay > days) return;
+
+            const nurseId = req.nurseId || req.fromNurseId;
+            const swapNurseId = req.swapNurseId;
+            if (!nurseId || !swapNurseId) return;
+
+            const shiftA = getShift(nurseId, swapDay);
+            const shiftB = getShift(swapNurseId, swapDay);
+            // Só troca se os turnos ainda não foram trocados
+            if (shiftA !== shiftB && shiftA !== 'OFF' && shiftB !== 'OFF') {
+                // Verifica se a troca já foi aplicada comparando com o esperado
+                // Se nurseA ainda tem seu turno original, a troca não foi aplicada
+                assign(nurseId, swapDay, shiftB);
+                assign(swapNurseId, swapDay, shiftA);
+                applied++;
+            }
+        }
+    });
+
+    if (applied > 0) {
+        saveData();
+        renderCalendar();
+        console.log(`[AUTO-APPLY] ${applied} alterações aplicadas de requisições aprovadas.`);
+        toast(`🔄 ${applied} turno(i) aggiornato(i) da richieste approvate`, 'info', 3000);
+
+        // Auto-publica alterações no cloud para que o Mobile veja
+        autoPublishMonth(m, y, days);
+    }
+}
+
+// Publica apenas a escala do mês atual no cloud (sem tocar funcionários/requisições)
+async function autoPublishMonth(m, y, days) {
+    try {
+        const displayNurses = getMonthlyNurses();
+        const escalaRows = displayNurses.map(nurse => {
+            const row = { nurseId: nurse.id, month: String(m + 1), year: String(y) };
+            for (let d = 1; d <= 31; d++) {
+                row['d' + d] = d <= days ? getShift(nurse.id, d) : '';
+            }
+            return row;
+        });
+        const escalaUrl = `${GOOGLE_API_URL}?action=bulkWrite&sheetName=Escala&apiKey=${API_KEY}`;
+        await fetch(escalaUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+                clearFilter: [{ column: 'month', value: String(m + 1) }, { column: 'year', value: String(y) }],
+                rows: escalaRows
+            })
+        });
+        console.log(`[AUTO-PUBLISH] Escala ${m+1}/${y} pubblicata automaticamente nel cloud.`);
+    } catch (e) {
+        console.warn('[AUTO-PUBLISH] Errore nella pubblicazione automatica:', e);
     }
 }
 
@@ -600,6 +707,7 @@ async function syncScheduleFromCloud() {
             // (garante que dados do cloud prevaleçam sobre dados locais stale)
             saveData();
             renderCalendar();
+            applyApprovedRequests(); // Auto-aplica requisições aprovadas pós-sync
 
             if (loaded > 0) {
                 toast(`☁️ Turni del mese scaricati dal cloud!`, 'info', 2000);
@@ -1261,17 +1369,27 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
                 return true;
             });
             
-            // Foca nos menos exaustos de noite
-            eligible.sort((a,b) => nightCount[a.id] - nightCount[b.id]);
-            
+            // Scoring inteligente para noturno: considera nightCount, horas acumuladas e limite individual
+            eligible.forEach(n => {
+                const nLimit = hourLimits[n.id] ? hourLimits[n.id] : 130;
+                const nHours = nurseHoursTemp(tSched, n.id);
+                const loadRatio = nHours / nLimit; // % do limite já consumido
+                const quota = n.nightQuota || 5;
+                const nightRatio = nightCount[n.id] / quota; // % da cota noturna já usada
+                // Score composto: menor = melhor candidata para noite
+                n._nightScore = (nightRatio * 100) + (loadRatio * 80) + (Math.random() * 5);
+            });
+            eligible.sort((a,b) => a._nightScore - b._nightScore);
+
             if (eligible.length > 0) {
                 let pair = eligible.find(n => getSh(tSched, n.id, d-1)==='N');
                 let chosen = pair;
-                
+
                 if (!chosen) {
-                    let topScore = nightCount[eligible[0].id];
-                    let topNurses = eligible.filter(n => nightCount[n.id] === topScore);
-                    // Rotação pseudoaleatória vitalícia para a exploração de árvore funcionar
+                    // Seleciona entre as top candidatas com score similar
+                    const topScore = eligible[0]._nightScore;
+                    const threshold = topScore + 10;
+                    const topNurses = eligible.filter(n => n._nightScore <= threshold);
                     chosen = topNurses[Math.floor(Math.random() * topNurses.length)];
                 }
 
@@ -1372,22 +1490,47 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
 
                 if (free.length > 0) {
                     free.forEach(n => {
-                        let p1 = d>1 ? getSh(tSched, n.id, d-1) : null;
-                        let seqPenalty = (p1 === t) ? 300 : 0; // Penaliza turnos repetidos consecutivos
-                        // Bonus/penalidade para equilíbrio G/M2 por enfermeira
+                        const nLimit = hourLimits[n.id] ? hourLimits[n.id] : 130;
+                        const nHours = nurseHoursTemp(tSched, n.id);
+                        const p1 = d>1 ? getSh(tSched, n.id, d-1) : null;
+
+                        // 1. Carga horária relativa ao limite individual (0 a 1+)
+                        //    Enfermeiras com limite menor (ex: Sirlene) são penalizadas mais cedo
+                        const loadRatio = nHours / nLimit;
+                        const loadPenalty = loadRatio * 200;
+
+                        // 2. Penaliza turnos consecutivos do mesmo tipo
+                        const seqPenalty = (p1 === t) ? 300 : 0;
+
+                        // 3. Equilíbrio do tipo de turno específico: quem já fez mais desse tipo pesa mais
+                        const typeCount = shiftCountTemp(n.id, t);
+                        const typePenalty = typeCount * 25;
+
+                        // 4. Equilíbrio G/M2 por enfermeira (evita acumular só G ou só M2)
                         let gm2Bias = 0;
-                        if (t === 'G') gm2Bias = (nurseGM2Count[n.id]?.g || 0) * 12;
-                        if (t === 'M2') gm2Bias = (nurseGM2Count[n.id]?.m2 || 0) * 12;
-                        // Penalidade de festivo: favorecer quem trabalhou menos festivos
+                        if (t === 'G') gm2Bias = (nurseGM2Count[n.id]?.g || 0) * 18;
+                        if (t === 'M2') gm2Bias = (nurseGM2Count[n.id]?.m2 || 0) * 18;
+
+                        // 5. Equilíbrio P vs M1: quem já tem muitos P ou M1 é desfavorecido
+                        let pmBias = 0;
+                        if (t === 'P') pmBias = shiftCountTemp(n.id, 'P') * 15;
+                        if (t === 'M1') pmBias = shiftCountTemp(n.id, 'M1') * 15;
+
+                        // 6. Penalidade de festivo: favorecer quem trabalhou menos festivos
                         let wkBias = 0;
                         if (festivo) {
                             let wkCount = 0;
                             for (let wd = 1; wd < d; wd++) {
                                 if (isFestivo(monthRef, wd) && getSh(tSched, n.id, wd) && !['OFF','FE','AT'].includes(getSh(tSched, n.id, wd))) wkCount++;
                             }
-                            wkBias = wkCount * 15;
+                            wkBias = wkCount * 20;
                         }
-                        n.tmpScore = (shiftCountTemp(n.id, t) * 10) + nurseHoursTemp(tSched, n.id) + seqPenalty + gm2Bias + wkBias + (Math.random() * 5);
+
+                        // 7. Variação diária: quem trabalhou ontem é levemente desfavorecido
+                        const workedYesterday = (p1 && !['OFF','FE','AT'].includes(p1)) ? 8 : 0;
+
+                        // Score composto: menor = melhor candidata
+                        n.tmpScore = loadPenalty + typePenalty + seqPenalty + gm2Bias + pmBias + wkBias + workedYesterday + (Math.random() * 4);
                     });
                     free.sort((a,b) => a.tmpScore - b.tmpScore);
                     const chosen = free[0];
@@ -1409,66 +1552,97 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         });
 
         // ── FUNÇÃO DE FITNESS COMPOSTA (MULTI-CRITÉRIO) ──
-        // Avalia qualidade da escala gerada em múltiplas dimensões
-        let maxH = 0, minH = 999;
+        // Avalia qualidade da escala considerando distribuição proporcional ao limite individual
         let repScore = 0;
         let weekendPenalty = 0;
         let postNightViolations = 0;
-        let gm2BalancePenalty = 0;
+        let shiftTypePenalty = 0;
+        let overloadPenalty = 0;
+        let loadVariancePenalty = 0;
         const monthRefFit = new Date(y, m, 1);
 
+        // Coleta métricas por enfermeira
+        const nurseMetrics = [];
         NURSES.forEach(n => {
-            let h = nurseHoursTemp(tSched, n.id);
-            if (h > maxH) maxH = h;
-            if (h < minH) minH = h;
+            const h = nurseHoursTemp(tSched, n.id);
+            const nLimit = hourLimits[n.id] ? hourLimits[n.id] : 130;
+            const loadPct = h / nLimit; // % do limite utilizado (normalizado)
 
             // 1. Repetições sequenciais de turnos iguais
             let cons = 0;
             for (let dt=2; dt<=days; dt++) {
-                let curr = getSh(tSched, n.id, dt);
-                let prev = getSh(tSched, n.id, dt-1);
+                const curr = getSh(tSched, n.id, dt);
+                const prev = getSh(tSched, n.id, dt-1);
                 if (curr && curr !== 'OFF' && curr !== 'FE' && curr !== 'AT') {
                     if (curr === prev) cons++;
                 }
             }
             repScore += cons;
 
-            // 2. Equilíbrio de festivos trabalhados por enfermeira (weekends + feriados italianos)
-            let wkendWorked = 0;
+            // 2. Equilíbrio de festivos trabalhados
+            let festiviWorked = 0;
             for (let dd = 1; dd <= days; dd++) {
                 if (isFestivo(monthRefFit, dd)) {
                     const s = getSh(tSched, n.id, dd);
-                    if (s && !['OFF','FE','AT'].includes(s)) wkendWorked++;
+                    if (s && !['OFF','FE','AT'].includes(s)) festiviWorked++;
                 }
             }
-            // Penaliza se uma enfermeira trabalha muitos ou nenhum festivo
-            if (wkendWorked > 4) weekendPenalty += (wkendWorked - 4) * 3000;
-            if (wkendWorked === 0) weekendPenalty += 2000;
+            if (festiviWorked > 4) weekendPenalty += (festiviWorked - 4) * 3000;
+            if (festiviWorked === 0) weekendPenalty += 2000;
 
-            // 3. Violações de descanso pós-noturno (deve ter OFF depois de noite)
+            // 3. Violações de descanso pós-noturno
             for (let dd = 1; dd < days; dd++) {
                 if (getSh(tSched, n.id, dd) === 'N') {
                     const next = getSh(tSched, n.id, dd+1);
-                    if (next && !['OFF','FE','AT','N'].includes(next)) {
-                        postNightViolations++;
-                    }
+                    if (next && !['OFF','FE','AT','N'].includes(next)) postNightViolations++;
                 }
             }
 
-            // 4. Equilíbrio G vs M2 por enfermeira
-            let gCnt = 0, m2Cnt = 0;
+            // 4. Contagem por tipo de turno
+            const counts = {};
+            ['M1','M2','MF','G','P','PF','N'].forEach(c => { counts[c] = 0; });
             for (let dd = 1; dd <= days; dd++) {
                 const s = getSh(tSched, n.id, dd);
-                if (s === 'G') gCnt++;
-                if (s === 'M2') m2Cnt++;
+                if (counts[s] !== undefined) counts[s]++;
             }
-            gm2BalancePenalty += Math.abs(gCnt - m2Cnt) * 200;
+
+            // 5. Equilíbrio G vs M2
+            shiftTypePenalty += Math.abs(counts['G'] - counts['M2']) * 200;
+            // 6. Equilíbrio P vs M1 (devem ser similares em dias úteis)
+            shiftTypePenalty += Math.abs(counts['P'] - counts['M1']) * 150;
+            // 7. Equilíbrio MF vs PF (devem ser similares em festivos)
+            shiftTypePenalty += Math.abs(counts['MF'] - counts['PF']) * 150;
+
+            // 8. Penalidade por sobrecarga: se ultrapassou o limite individual
+            if (h > nLimit) overloadPenalty += (h - nLimit) * 500;
+
+            nurseMetrics.push({ id: n.id, h, nLimit, loadPct, counts });
         });
 
-        // 5. Penalizar dias úteis do mês real que ficaram com < 3 turnos diurnos preenchidos
+        // 9. Variância de carga relativa (loadPct): penaliza desequilíbrio proporcional
+        //    Ex: Se Sirlene tem limite 100h e está com 95h (95%), e Sabina tem 135h com 130h (96%),
+        //    elas estão equilibradas PROPORCIONALMENTE mesmo com horas absolutas diferentes
+        const avgLoadPct = nurseMetrics.reduce((s, nm) => s + nm.loadPct, 0) / nurseMetrics.length;
+        nurseMetrics.forEach(nm => {
+            loadVariancePenalty += Math.abs(nm.loadPct - avgLoadPct) * 8000;
+        });
+
+        // 10. Equilíbrio de noturno entre enfermeiras (desvio da média)
+        let nightBalancePenalty = 0;
+        const nightCounts = nurseMetrics.map(nm => nm.counts['N']);
+        const avgNight = nightCounts.reduce((s,v) => s+v, 0) / nightCounts.length;
+        nightCounts.forEach(nc => { nightBalancePenalty += Math.abs(nc - avgNight) * 400; });
+
+        // 11. Equilíbrio de P entre enfermeiras
+        let pBalancePenalty = 0;
+        const pCounts = nurseMetrics.map(nm => nm.counts['P']);
+        const avgP = pCounts.reduce((s,v) => s+v, 0) / pCounts.length;
+        pCounts.forEach(pc => { pBalancePenalty += Math.abs(pc - avgP) * 300; });
+
+        // 12. Penalizar dias úteis com cobertura < 3 turnos diurnos
         let incompleteDays = 0;
         for (let dd = 1; dd <= days; dd++) {
-            if (isFestivo(monthRefFit, dd)) continue; // Pula festivos (weekends + feriados)
+            if (isFestivo(monthRefFit, dd)) continue;
             let filledCount = 0;
             NURSES.forEach(n => {
                 const s = getSh(tSched, n.id, dd);
@@ -1478,14 +1652,17 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         }
 
         // Fitness composta ponderada
-        let fitness = 100000
+        let fitness = 200000
             - (emptyShifts * 25000)          // Buracos críticos
             - (incompleteDays * 35000)       // Dias incompletos
             - (repScore * 5000)              // Turnos repetidos consecutivos
-            - (weekendPenalty)               // Desequilíbrio de fins de semana
+            - (weekendPenalty)               // Desequilíbrio festivos
             - (postNightViolations * 8000)   // Violação descanso pós-noturno
-            - (gm2BalancePenalty)             // Desequilíbrio G/M2
-            - ((maxH - minH) * 10);          // Variância de horas (peso dobrado)
+            - (shiftTypePenalty)             // Desequilíbrio tipos de turno (G/M2, P/M1, MF/PF)
+            - (overloadPenalty)              // Sobrecarga além do limite individual
+            - (loadVariancePenalty)           // Variância proporcional de carga
+            - (nightBalancePenalty)           // Desequilíbrio noturno entre enfermeiras
+            - (pBalancePenalty);              // Desequilíbrio P entre enfermeiras
 
         return { scheduleModel: tSched, fitness: fitness, emptyShifts: emptyShifts };
     }
@@ -1506,7 +1683,7 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         }
 
         // Critério de parada adiantado: se encontrou solução excelente e estabilizou
-        if (bestSim.emptyShifts === 0 && bestSim.fitness > 99500) {
+        if (bestSim.emptyShifts === 0 && bestSim.fitness > 195000) {
             validIterCount++;
             if (validIterCount > 10) break;  // Mais iterações de confirmação
         }
@@ -2493,6 +2670,11 @@ function toggleReportView(mode) {
     renderReports();
 }
 
+function setReportNurseFilter(nurseId) {
+    reportNurseFilter = nurseId;
+    renderReports();
+}
+
 function renderReports() {
     if (!currentUser) return;
     if (reportViewMode === 'annual') { renderAnnualReport(); return; }
@@ -2505,38 +2687,39 @@ function renderMonthlyReport() {
     const m = refMonth.getMonth();
     const y = refMonth.getFullYear();
     const months = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+    const dayNamesShort = ['D','L','M','M','G','V','S'];
+    const dayNamesFull = ['Domenica','Lunedì','Martedì','Mercoledì','Giovedì','Venerdì','Sabato'];
     const monthLabel = `${months[m]} ${y}`;
 
-    // Seleção de enfermeiras: coordenadora vê todas, enfermeira vê só a dela
+    // All nurses for data collection (always compute full team)
     const monthKey = `${m}_${y}`;
     const orderForMonth = monthlyOrder[monthKey] || NURSES.map(n => n.id);
-    const displayNurses = isCoordinator
+    const allNurses = isCoordinator
         ? orderForMonth.map(id => NURSES.find(n => n.id === id)).filter(Boolean)
         : [NURSES.find(n => n.id === currentUser.id)].filter(Boolean);
 
-    if (displayNurses.length === 0) {
+    if (allNurses.length === 0) {
         document.getElementById('reportsTab').innerHTML = `<div class="empty-state" style="padding:80px"><div class="empty-icon">📊</div><p>Nessun personale attivo questo mese.</p></div>`;
         return;
     }
 
-    // ── COLETA DE DADOS AGREGADOS ──
+    // ── COLETA DE DADOS AGREGADOS (always full team) ──
     let teamTotalH = 0, teamWorkDays = 0, teamRestDays = 0, teamNightShifts = 0;
     let teamAbsences = 0, teamVacations = 0;
     const nurseData = [];
 
     const monthRef = new Date(y, m, 1);
-    // Ore Dovute: dias úteis (non-festivi) × 7.5h (standard contrattuale italiano)
     let giorniFeriali = 0;
     for (let d = 1; d <= daysInMo; d++) { if (!isFestivo(monthRef, d)) giorniFeriali++; }
     const oreDovute = giorniFeriali * 7.5;
 
-    // Copertura giornaliera (quanti turni attivi per giorno)
+    // Copertura giornaliera
     const dailyCoverage = [];
     for (let d = 1; d <= daysInMo; d++) {
         const fest = isFestivo(monthRef, d);
         let count = 0;
         const dayShifts = {};
-        displayNurses.forEach(n => {
+        allNurses.forEach(n => {
             const code = getShiftForMonth(n.id, d, m, y);
             if (code && !['OFF','FE','AT'].includes(code)) {
                 count++;
@@ -2547,16 +2730,18 @@ function renderMonthlyReport() {
         dailyCoverage.push({ day: d, count, expected, fest, shifts: dayShifts });
     }
 
-    displayNurses.forEach(n => {
+    allNurses.forEach(n => {
         let totalH = 0, workDays = 0, restDays = 0, nightCount = 0;
         let feCount = 0, atCount = 0, offCount = 0;
         const shiftCounts = {};
         let weekendsWorked = 0;
         const weekendSet = new Set();
-        // Breakdown ore: diurno/notturno × feriale/festivo
         let oreDiurneFeriali = 0, oreDiurneFestive = 0;
         let oreNotturneFeriali = 0, oreNotturneFestive = 0;
         let oreFerie = 0, oreMalattia = 0;
+        // Track consecutive work streaks and post-night violations
+        let maxConsecutiveWork = 0, currentStreak = 0;
+        let postNightViolations = 0, prevWasNight = false;
 
         for (let d = 1; d <= daysInMo; d++) {
             const code = getShiftForMonth(n.id, d, m, y);
@@ -2566,26 +2751,23 @@ function renderMonthlyReport() {
             totalH += sh.h;
             shiftCounts[code] = (shiftCounts[code] || 0) + 1;
 
-            if (['OFF'].includes(code)) { offCount++; restDays++; }
-            else if (code === 'FE') { feCount++; restDays++; oreFerie += 7.5; }
-            else if (code === 'AT') { atCount++; restDays++; oreMalattia += 7.5; }
-            else { workDays++; }
+            if (['OFF'].includes(code)) { offCount++; restDays++; currentStreak = 0; }
+            else if (code === 'FE') { feCount++; restDays++; oreFerie += 7.5; currentStreak = 0; }
+            else if (code === 'AT') { atCount++; restDays++; oreMalattia += 7.5; currentStreak = 0; }
+            else { workDays++; currentStreak++; if (currentStreak > maxConsecutiveWork) maxConsecutiveWork = currentStreak; }
             if (code === 'N') nightCount++;
 
-            // Breakdown ore diurne/notturne × feriali/festive
+            // Post-night violation
+            if (prevWasNight && !['OFF','FE','AT'].includes(code) && code !== 'N') postNightViolations++;
+            prevWasNight = (code === 'N');
+
             const fest = isFestivo(monthRef, d);
             if (code === 'N') {
-                if (fest) oreNotturneFestive += sh.h;
-                else oreNotturneFeriali += sh.h;
+                if (fest) oreNotturneFestive += sh.h; else oreNotturneFeriali += sh.h;
             } else if (!['OFF','FE','AT'].includes(code)) {
-                if (fest) oreDiurneFestive += sh.h;
-                else oreDiurneFeriali += sh.h;
+                if (fest) oreDiurneFestive += sh.h; else oreDiurneFeriali += sh.h;
             }
-
-            // Festivos trabalhados (weekends + feriados italianos)
-            if (fest && !['OFF','FE','AT'].includes(code)) {
-                weekendSet.add(d);
-            }
+            if (fest && !['OFF','FE','AT'].includes(code)) weekendSet.add(d);
         }
         weekendsWorked = weekendSet.size;
 
@@ -2600,11 +2782,12 @@ function renderMonthlyReport() {
             nurse: n, totalH, workDays, restDays, nightCount,
             feCount, atCount, offCount, shiftCounts, weekendsWorked,
             oreDiurneFeriali, oreDiurneFestive, oreNotturneFeriali, oreNotturneFestive,
-            oreFerie, oreMalattia, oreDovute, differenza: totalH - oreDovute
+            oreFerie, oreMalattia, oreDovute, differenza: totalH - oreDovute,
+            maxConsecutiveWork, postNightViolations
         });
     });
 
-    // Contadores de requests do mês
+    // Requests do mês
     const monthRequests = requests.filter(r => {
         const rDate = sanitizeDate(r.startDate || r.date || r.createdAt?.split('T')[0] || '');
         if (!rDate) return false;
@@ -2615,38 +2798,252 @@ function renderMonthlyReport() {
     const approvedReqs = monthRequests.filter(r => r.status === 'approved').length;
     const rejectedReqs = monthRequests.filter(r => r.status === 'rejected').length;
 
-    // Taxa de absenteísmo: (dias AT + FE) / (total dias possíveis) * 100
-    const totalPossibleDays = displayNurses.length * daysInMo;
+    const totalPossibleDays = allNurses.length * daysInMo;
     const absentDays = nurseData.reduce((s, nd) => s + nd.atCount + nd.feCount, 0);
     const absenteeismRate = totalPossibleDays > 0 ? ((absentDays / totalPossibleDays) * 100).toFixed(1) : '0.0';
-
-    // Horas médias
-    const avgHours = displayNurses.length > 0 ? (teamTotalH / displayNurses.length).toFixed(1) : '0.0';
+    const avgHours = allNurses.length > 0 ? (teamTotalH / allNurses.length).toFixed(1) : '0.0';
     const maxH = Math.max(...nurseData.map(nd => nd.totalH));
     const minH = Math.min(...nurseData.map(nd => nd.totalH));
     const hourSpread = (maxH - minH).toFixed(1);
 
+    // Coverage issues
+    const coverageIssues = dailyCoverage.filter(dc => dc.count < dc.expected).length;
+    const coverageRate = daysInMo > 0 ? (((daysInMo - coverageIssues) / daysInMo) * 100).toFixed(0) : '100';
+
+    // ── Build nurse filter dropdown (coordinator only) ──
+    const filterOptions = isCoordinator
+        ? `<option value="all" ${reportNurseFilter==='all'?'selected':''}>👥 Panoramica Team</option>` +
+          allNurses.map(n => `<option value="${n.id}" ${reportNurseFilter===n.id?'selected':''}>${n.name}</option>`).join('')
+        : '';
+
+    // ── Determine if individual or team view ──
+    const isIndividual = reportNurseFilter !== 'all' && isCoordinator;
+    const selectedNd = isIndividual ? nurseData.find(nd => nd.nurse.id === reportNurseFilter) : null;
+
     // ── RENDER HTML ──
     const tab = document.getElementById('reportsTab');
-    tab.innerHTML = `
-    <div class="reports-wrap" style="max-width:1200px;">
+
+    // ── HEADER (always shown) ──
+    let html = `<div class="reports-wrap" style="max-width:1200px;">
         <div class="rpt-header">
-            <h2>📊 Dashboard Operativo</h2>
+            <h2>📊 Rapporto Operativo</h2>
             <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
                 <div class="rpt-view-toggle">
                     <button class="rpt-toggle-btn ${reportViewMode==='monthly'?'active':''}" onclick="toggleReportView('monthly')">Mensile</button>
                     <button class="rpt-toggle-btn ${reportViewMode==='annual'?'active':''}" onclick="toggleReportView('annual')">Annuale</button>
                 </div>
+                ${isCoordinator ? `<select class="rpt-nurse-filter" onchange="setReportNurseFilter(this.value)" style="
+                    background:var(--surface); color:var(--text); border:1px solid var(--border);
+                    border-radius:8px; padding:6px 12px; font-size:13px; font-weight:600;
+                    font-family:var(--font); cursor:pointer; min-width:180px;
+                ">${filterOptions}</select>` : ''}
                 <div class="rpt-month-nav">
                     <button class="rpt-nav-btn" onclick="changeReportMonth(-1)" title="Mese precedente">◀</button>
                     <span class="rpt-month">${monthLabel}</span>
                     <button class="rpt-nav-btn" onclick="changeReportMonth(1)" title="Mese successivo">▶</button>
                 </div>
             </div>
+        </div>`;
+
+    // ═══════════════════════════════════════════════════════════
+    // ── INDIVIDUAL NURSE VIEW ──
+    // ═══════════════════════════════════════════════════════════
+    if (isIndividual && selectedNd) {
+        const nd = selectedNd;
+        const nightQuota = nd.nurse.nightQuota || 5;
+        const nightPct = Math.min((nd.nightCount / nightQuota) * 100, 100).toFixed(0);
+        const nightColor = nd.nightCount > nightQuota ? 'var(--danger)' : nd.nightCount === nightQuota ? 'var(--warning)' : 'var(--primary)';
+        const diff = nd.differenza;
+        const diffColor = diff > 0 ? 'var(--success)' : diff < 0 ? 'var(--danger)' : 'var(--text-2)';
+        const diffSign = diff > 0 ? '+' : '';
+
+        // Rank position
+        const sortedByH = [...nurseData].sort((a,b) => b.totalH - a.totalH);
+        const rank = sortedByH.findIndex(x => x.nurse.id === nd.nurse.id) + 1;
+
+        // Compare to team average
+        const avgH = parseFloat(avgHours);
+        const vsAvg = nd.totalH - avgH;
+        const vsAvgSign = vsAvg > 0 ? '+' : '';
+        const vsAvgColor = Math.abs(vsAvg) < 5 ? 'var(--success)' : vsAvg > 0 ? 'var(--warning)' : 'var(--danger)';
+
+        html += `
+        <!-- Individual Header Card -->
+        <div style="background:linear-gradient(135deg, rgba(139,92,246,0.12), rgba(59,130,246,0.08)); border:1px solid rgba(139,92,246,0.25); border-radius:16px; padding:24px; margin-bottom:20px;">
+            <div style="display:flex; align-items:center; gap:16px; margin-bottom:16px;">
+                <div style="width:56px; height:56px; border-radius:14px; background:var(--primary); display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:900; color:white;">${nd.nurse.initials}</div>
+                <div>
+                    <h3 style="margin:0; font-size:20px; font-weight:800; color:var(--text);">${nd.nurse.name}</h3>
+                    <p style="margin:2px 0 0; font-size:13px; color:var(--text-3);">Scheda Individuale — ${monthLabel}</p>
+                </div>
+                <div style="margin-left:auto; text-align:right;">
+                    <div style="font-size:32px; font-weight:900; color:var(--primary-light);">#${rank}</div>
+                    <div style="font-size:11px; color:var(--text-3);">su ${allNurses.length} infermiere</div>
+                </div>
+            </div>
+
+            <!-- Executive summary text -->
+            <div style="background:rgba(0,0,0,0.15); border-radius:10px; padding:14px 16px; font-size:13px; line-height:1.6; color:var(--text-2);">
+                Nel mese di <strong>${monthLabel}</strong>, <strong>${nd.nurse.name}</strong> ha lavorato <strong>${nd.workDays} giorni</strong> per un totale di <strong>${nd.totalH.toFixed(1)} ore</strong>
+                (${vsAvgSign}${vsAvg.toFixed(1)}h rispetto alla media team di ${avgH}h).
+                ${nd.nightCount > 0 ? `Ha svolto <strong>${nd.nightCount} turni notturni</strong> su ${nightQuota} previsti.` : 'Nessun turno notturno svolto.'}
+                ${nd.weekendsWorked > 0 ? `Ha lavorato <strong>${nd.weekendsWorked} giorni festivi</strong>.` : ''}
+                ${nd.feCount > 0 ? `Ferie godute: <strong>${nd.feCount} giorni</strong>.` : ''}
+                ${nd.atCount > 0 ? `Certificati/licenze: <strong>${nd.atCount} giorni</strong>.` : ''}
+                ${nd.postNightViolations > 0 ? `<span style="color:var(--danger);">⚠️ ${nd.postNightViolations} violazioni post-notte rilevate.</span>` : ''}
+            </div>
+        </div>
+
+        <!-- Individual KPI Cards -->
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(140px,1fr));">
+            <div class="stat-card stat-primary">
+                <div class="stat-lbl">Ore Lavorate</div>
+                <div class="stat-val" style="font-size:28px;">${nd.totalH.toFixed(1)}h</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;color:${vsAvgColor}">${vsAvgSign}${vsAvg.toFixed(1)}h vs media</div>
+            </div>
+            <div class="stat-card stat-success">
+                <div class="stat-lbl">Giorni Lavorati</div>
+                <div class="stat-val" style="font-size:28px;">${nd.workDays}</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">Riposo: ${nd.restDays}</div>
+            </div>
+            <div class="stat-card stat-night">
+                <div class="stat-lbl">Turni Notturni</div>
+                <div class="stat-val" style="font-size:28px;">${nd.nightCount}/${nightQuota}</div>
+            </div>
+            <div class="stat-card stat-warning">
+                <div class="stat-lbl">Festivi Lavorati</div>
+                <div class="stat-val" style="font-size:28px;">${nd.weekendsWorked}</div>
+            </div>
+            <div class="stat-card" style="background:rgba(16,185,129,0.08); border-color:rgba(16,185,129,0.2);">
+                <div class="stat-lbl">Bilancio Ore</div>
+                <div class="stat-val" style="font-size:28px; color:${diffColor};">${diffSign}${diff.toFixed(1)}h</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">Dovute: ${oreDovute.toFixed(1)}h</div>
+            </div>
+            <div class="stat-card" style="background:rgba(239,68,68,0.08); border-color:rgba(239,68,68,0.2);">
+                <div class="stat-lbl">Consecutivi Max</div>
+                <div class="stat-val" style="font-size:28px; color:${nd.maxConsecutiveWork > 6 ? 'var(--danger)' : 'var(--text)'};">${nd.maxConsecutiveWork}</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">giorni di fila</div>
+            </div>
+        </div>
+
+        <!-- Distribuzione Turni Individuale (visual chips) -->
+        <div class="report-section">
+            <h3>🔄 Distribuzione Turni</h3>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(90px,1fr)); gap:8px;">
+            ${['M1','M2','MF','G','P','PF','N','OFF','FE','AT'].map(c => {
+                const cnt = nd.shiftCounts[c] || 0;
+                const s = SHIFTS[c];
+                const opacity = cnt > 0 ? '1' : '0.3';
+                const hrs = (cnt * s.h).toFixed(1);
+                return `<div style="background:${s.color}; opacity:${opacity}; border-radius:12px; padding:12px 8px; text-align:center;">
+                    <div style="font-size:12px; font-weight:800; color:${s.text};">${c}</div>
+                    <div style="font-size:24px; font-weight:900; color:${s.text}; line-height:1.2;">${cnt}</div>
+                    <div style="font-size:10px; color:${s.text}; opacity:0.8;">${hrs}h</div>
+                </div>`;
+            }).join('')}
+            </div>
+        </div>
+
+        <!-- Ripartizione ore individuale -->
+        <div class="report-section">
+            <h3>📊 Ripartizione Ore</h3>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+                <div style="background:rgba(14,165,233,0.08); border:1px solid rgba(14,165,233,0.2); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:10px; color:var(--text-3); text-transform:uppercase; font-weight:700;">Diurne Feriali</div>
+                    <div style="font-size:22px; font-weight:900; color:#38bdf8; margin:4px 0;">${nd.oreDiurneFeriali.toFixed(1)}h</div>
+                </div>
+                <div style="background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.2); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:10px; color:var(--text-3); text-transform:uppercase; font-weight:700;">Diurne Festive</div>
+                    <div style="font-size:22px; font-weight:900; color:#fbbf24; margin:4px 0;">${nd.oreDiurneFestive.toFixed(1)}h</div>
+                </div>
+                <div style="background:rgba(30,27,75,0.3); border:1px solid rgba(139,92,246,0.3); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:10px; color:var(--text-3); text-transform:uppercase; font-weight:700;">Notturne Feriali</div>
+                    <div style="font-size:22px; font-weight:900; color:#a78bfa; margin:4px 0;">${nd.oreNotturneFeriali.toFixed(1)}h</div>
+                </div>
+                <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.2); border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:10px; color:var(--text-3); text-transform:uppercase; font-weight:700;">Notturne Festive</div>
+                    <div style="font-size:22px; font-weight:900; color:#f87171; margin:4px 0;">${nd.oreNotturneFestive.toFixed(1)}h</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quota notturni bar -->
+        <div class="report-section">
+            <h3>🌙 Quota Turni Notturni</h3>
+            <div style="background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:12px; padding:16px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <span style="font-size:13px; font-weight:700; color:var(--text-2);">Progresso</span>
+                    <span style="font-size:15px; font-weight:900; color:${nightColor};">${nd.nightCount} / ${nightQuota}</span>
+                </div>
+                <div style="height:12px; background:rgba(255,255,255,0.06); border-radius:99px; overflow:hidden;">
+                    <div style="width:${nightPct}%; height:100%; background:${nightColor}; border-radius:99px; transition:width 0.6s;"></div>
+                </div>
+                <div style="font-size:11px; color:var(--text-3); margin-top:6px;">${nightPct}% della quota mensile completata</div>
+            </div>
+        </div>
+
+        <!-- Mappa giornaliera individuale -->
+        <div class="report-section">
+            <h3>📅 Mappa Turni del Mese</h3>
+            <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px;">
+            ${(() => {
+                const firstDow = new Date(y, m, 1).getDay();
+                const emptyCells = (firstDow + 6) % 7;
+                let cells = '';
+                // Weekday headers
+                ['L','M','M','G','V','S','D'].forEach(dn => {
+                    cells += `<div style="text-align:center; font-size:10px; font-weight:700; color:var(--text-3); padding:4px 0;">${dn}</div>`;
+                });
+                // Empty cells
+                for (let i = 0; i < emptyCells; i++) cells += '<div></div>';
+                // Days
+                for (let d = 1; d <= daysInMo; d++) {
+                    const code = getShiftForMonth(nd.nurse.id, d, m, y);
+                    const s = SHIFTS[code] || SHIFTS['OFF'];
+                    const fest = isFestivo(monthRef, d);
+                    cells += `<div style="
+                        background:${s.color}; border-radius:6px; padding:4px 2px; text-align:center;
+                        border:${fest ? '2px solid rgba(245,158,11,0.5)' : '1px solid rgba(255,255,255,0.05)'};
+                    " title="Giorno ${d}: ${code} (${s.h}h)${fest ? ' — Festivo' : ''}">
+                        <div style="font-size:9px; color:${s.text}; opacity:0.7;">${d}</div>
+                        <div style="font-size:11px; font-weight:800; color:${s.text};">${code}</div>
+                    </div>`;
+                }
+                return cells;
+            })()}
+            </div>
+        </div>`;
+
+    } else {
+    // ═══════════════════════════════════════════════════════════
+    // ── TEAM OVERVIEW (default) ──
+    // ═══════════════════════════════════════════════════════════
+
+    // Executive summary narrative
+    const coverStatus = coverageIssues === 0 ? '✅ completa' : `⚠️ ${coverageIssues} giorni scoperti`;
+    const balanceStatus = parseFloat(hourSpread) < 10 ? '✅ equilibrata' : '⚠️ da riequilibrare';
+    const topNurse = nurseData.reduce((a,b) => a.totalH > b.totalH ? a : b);
+    const bottomNurse = nurseData.reduce((a,b) => a.totalH < b.totalH ? a : b);
+
+    html += `
+        <!-- Executive Summary -->
+        <div style="background:linear-gradient(135deg, rgba(139,92,246,0.08), rgba(59,130,246,0.05)); border:1px solid rgba(139,92,246,0.15); border-radius:14px; padding:20px; margin-bottom:20px;">
+            <h3 style="margin:0 0 10px; font-size:15px; font-weight:800; color:var(--text);">📝 Sintesi Esecutiva</h3>
+            <p style="font-size:13px; line-height:1.7; color:var(--text-2); margin:0;">
+                Nel mese di <strong>${monthLabel}</strong>, il team di <strong>${allNurses.length} infermiere</strong> ha totalizzato
+                <strong>${teamTotalH.toFixed(1)} ore</strong> di servizio (media ${avgHours}h/persona) con <strong>${teamNightShifts} turni notturni</strong>.
+                La copertura giornaliera è ${coverStatus}. La distribuzione del carico è ${balanceStatus}
+                (dispersione ${hourSpread}h). L'infermiera con più ore è <strong>${topNurse.nurse.name}</strong> (${topNurse.totalH.toFixed(1)}h)
+                e quella con meno è <strong>${bottomNurse.nurse.name}</strong> (${bottomNurse.totalH.toFixed(1)}h).
+                ${teamAbsences > 0 ? `Assenze per certificato: <strong>${teamAbsences} giorni</strong>.` : ''}
+                ${teamVacations > 0 ? `Ferie godute: <strong>${teamVacations} giorni</strong>.` : ''}
+                Tasso di assenteismo: <strong>${absenteeismRate}%</strong>.
+                ${pendingReqs > 0 ? `<span style="color:var(--warning);">⏳ ${pendingReqs} richieste in attesa di approvazione.</span>` : ''}
+            </p>
         </div>
 
         <!-- KPI Cards -->
-        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px,1fr));">
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px,1fr));">
             <div class="stat-card stat-primary">
                 <div class="stat-lbl">Ore Totali Team</div>
                 <div class="stat-val" style="font-size:28px;">${teamTotalH.toFixed(1)}h</div>
@@ -2663,41 +3060,45 @@ function renderMonthlyReport() {
                 <div style="font-size:11px; opacity:0.7; margin-top:4px;">${daysInMo} notti necessarie</div>
             </div>
             <div class="stat-card stat-warning">
-                <div class="stat-lbl">Tasso Assenteismo</div>
+                <div class="stat-lbl">Assenteismo</div>
                 <div class="stat-val" style="font-size:28px;">${absenteeismRate}%</div>
-                <div style="font-size:11px; opacity:0.7; margin-top:4px;">${absentDays} giorni assenti</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">${absentDays} giorni</div>
+            </div>
+            <div class="stat-card" style="background:rgba(14,165,233,0.08); border-color:rgba(14,165,233,0.2);">
+                <div class="stat-lbl">Copertura</div>
+                <div class="stat-val" style="font-size:28px; color:${coverageIssues === 0 ? 'var(--success)' : 'var(--danger)'};">${coverageRate}%</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">${coverageIssues > 0 ? coverageIssues + ' scoperte' : 'Completa'}</div>
+            </div>
+            <div class="stat-card" style="background:rgba(139,92,246,0.08); border-color:rgba(139,92,246,0.2);">
+                <div class="stat-lbl">Equilibrio</div>
+                <div class="stat-val" style="font-size:28px; color:${parseFloat(hourSpread) < 10 ? 'var(--success)' : 'var(--warning)'};">${hourSpread}h</div>
+                <div style="font-size:11px; opacity:0.7; margin-top:4px;">dispersione max-min</div>
             </div>
         </div>
 
         <!-- Indicadores de RH -->
         <div class="report-section">
             <h3>📋 Indicatori Risorse Umane</h3>
-            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:16px; margin-bottom:16px;">
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:12px;">
                 <div style="background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.2); border-radius:12px; padding:16px; text-align:center;">
                     <div style="font-size:24px; font-weight:900; color:var(--warning);">${pendingReqs}</div>
-                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Richieste In Attesa</div>
+                    <div style="font-size:11px; color:var(--text-3); margin-top:4px;">Richieste In Attesa</div>
                 </div>
                 <div style="background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.2); border-radius:12px; padding:16px; text-align:center;">
                     <div style="font-size:24px; font-weight:900; color:var(--success);">${approvedReqs}</div>
-                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Richieste Approvate</div>
+                    <div style="font-size:11px; color:var(--text-3); margin-top:4px;">Richieste Approvate</div>
                 </div>
                 <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.2); border-radius:12px; padding:16px; text-align:center;">
                     <div style="font-size:24px; font-weight:900; color:var(--danger);">${rejectedReqs}</div>
-                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Richieste Rifiutate</div>
+                    <div style="font-size:11px; color:var(--text-3); margin-top:4px;">Richieste Rifiutate</div>
                 </div>
-                <div style="background:rgba(139,92,246,0.08); border:1px solid rgba(139,92,246,0.2); border-radius:12px; padding:16px; text-align:center;">
-                    <div style="font-size:24px; font-weight:900; color:var(--primary-light);">${hourSpread}h</div>
-                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Dispersione Ore (Max-Min)</div>
-                </div>
-            </div>
-            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:16px;">
                 <div style="background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.15); border-radius:12px; padding:16px; text-align:center;">
                     <div style="font-size:24px; font-weight:900; color:var(--success);">${teamVacations}</div>
-                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Giorni Ferie (FE)</div>
+                    <div style="font-size:11px; color:var(--text-3); margin-top:4px;">Giorni Ferie (FE)</div>
                 </div>
                 <div style="background:rgba(239,68,68,0.05); border:1px solid rgba(239,68,68,0.15); border-radius:12px; padding:16px; text-align:center;">
                     <div style="font-size:24px; font-weight:900; color:var(--danger);">${teamAbsences}</div>
-                    <div style="font-size:12px; color:var(--text-3); margin-top:4px;">Certificati/Licenze (AT)</div>
+                    <div style="font-size:11px; color:var(--text-3); margin-top:4px;">Certificati (AT)</div>
                 </div>
             </div>
         </div>
@@ -2718,10 +3119,10 @@ function renderMonthlyReport() {
                     <th>Carico</th>
                 </tr></thead>
                 <tbody>
-                ${nurseData.sort((a,b) => b.totalH - a.totalH).map((nd, idx) => {
+                ${[...nurseData].sort((a,b) => b.totalH - a.totalH).map((nd, idx) => {
                     const pct = maxH > 0 ? ((nd.totalH / maxH) * 100).toFixed(0) : 0;
                     const barColor = nd.totalH >= maxH ? 'var(--danger)' : nd.totalH <= minH ? 'var(--success)' : 'var(--primary)';
-                    return `<tr>
+                    return `<tr style="cursor:pointer;" onclick="setReportNurseFilter('${nd.nurse.id}')" title="Clicca per analisi individuale">
                         <td style="text-align:left"><strong>${idx+1}.</strong> ${nd.nurse.name}</td>
                         <td><strong>${nd.totalH.toFixed(1)}h</strong></td>
                         <td>${nd.workDays}</td>
@@ -2838,7 +3239,6 @@ function renderMonthlyReport() {
                 const bg = ok ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.2)';
                 const border = ok ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.5)';
                 const textColor = ok ? 'var(--success)' : 'var(--danger)';
-                const dayNames = ['D','L','M','M','G','V','S'];
                 const dow = new Date(y, m, dc.day).getDay();
                 return `<div style="
                     display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -2846,7 +3246,7 @@ function renderMonthlyReport() {
                     background:${bg}; border:1px solid ${border};
                     font-size:10px; font-weight:600;
                 " title="Giorno ${dc.day} (${dc.fest?'Festivo':'Feriale'}): ${dc.count}/${dc.expected} turni${dc.count < dc.expected ? ' ⚠️ SCOPERTO' : ''}&#10;${Object.entries(dc.shifts).map(([k,v]) => k+':'+v).join(', ')}">
-                    <span style="font-size:9px; opacity:0.6;">${dayNames[dow]}</span>
+                    <span style="font-size:9px; opacity:0.6;">${dayNamesShort[dow]}</span>
                     <span style="font-size:14px; font-weight:800; color:${textColor};">${dc.count}</span>
                     <span style="font-size:8px; opacity:0.5;">${dc.day}</span>
                 </div>`;
@@ -2871,8 +3271,11 @@ function renderMonthlyReport() {
                 </div>`;
             }).join('')}
             </div>
-        </div>
-    </div>`;
+        </div>`;
+    } // end team overview
+
+    html += `</div>`; // close reports-wrap
+    tab.innerHTML = html;
 }
 
 // ── ANNUAL REPORT ────────────────────────────────────────────
