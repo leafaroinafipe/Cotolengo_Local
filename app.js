@@ -5,10 +5,10 @@
 // ============================================================
 
 // ── CONFIG ────────────────────────────────────────────────────
-const APP_CACHE_VERSION = 'v2.2'; // Incrementar para forçar resync do cloud
+const APP_CACHE_VERSION = 'v2.3'; // Incrementar para forçar resync do cloud
 const COORD_PASS  = 'coord2026';
 const NURSE_PASS  = 'enfermeira123';
-const GOOGLE_API_URL = 'https://script.google.com/macros/s/AKfycbwsfN_I_dP8H6C7odQDPeppoecyiUPAtdo6_P3bBgIj_vfMULKX6Qm5XyZB4P2zmYWiqQ/exec';
+const GOOGLE_API_URL = 'https://script.google.com/macros/s/AKfycbw7Hzr4C0V7cIM0pnU7ehbT3rpiwg-BTBpb7hnkgzIICYIbf8tBHXdjw82bFzTVVh2XxA/exec';
 const API_KEY = 'cotolengo_2026_secure_key';
 
 // ── UTILS: ID único ──────────────────────────────────────────
@@ -45,7 +45,7 @@ let NURSES = [
     { id:'n1', name:'Balla Sabina',        initials:'BS', nightQuota:5 },
     { id:'n2', name:'Batista Bianca',      initials:'BB', nightQuota:5 },
     { id:'n3', name:'De Carvalho Eduarda', initials:'CE', nightQuota:5 },
-    { id:'n4', name:'Festa Alves Melissa', initials:'FM', nightQuota:5 },
+    { id:'n4', name:'Alves Festa Melissa', initials:'AM', nightQuota:5 },
     { id:'n5', name:'Delizzeti Sirlene',   initials:'DS', nightQuota:5 },
     { id:'n6', name:'Moslih Miriam',       initials:'MM', nightQuota:5 },
     { id:'n7', name:'Kocevska Kristina',   initials:'KK', nightQuota:5 }
@@ -280,7 +280,7 @@ async function publishToCloud() {
         await fetch(escalaUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ clearFilter: { column: 'month', value: String(m + 1) }, rows: escalaRows }),
+            body: JSON.stringify({ clearFilter: [{ column: 'month', value: String(m + 1) }, { column: 'year', value: String(y) }], rows: escalaRows }),
             signal: pubController.signal
         });
 
@@ -1561,8 +1561,8 @@ function nurseHours(nurseId) {
     return h;
 }
 
-function clearSchedule() {
-    if (!confirm('Sei sicuro di voler cancellare tutti i turni costruiti questo mese? Questo rimuoverà tutti i turni attuali del mese dallo schermo.')) return;
+async function clearSchedule() {
+    if (!confirm('Sei sicuro di voler cancellare tutti i turni costruiti questo mese?\nQuesto rimuoverà i turni dal sistema locale E dal database cloud.')) return;
     const m = currentMonth.getMonth();
     const y = currentMonth.getFullYear();
     const prefixRegex = new RegExp(`_${m}_${y}_\\d+$`);
@@ -1573,7 +1573,28 @@ function clearSchedule() {
     }
     renderCalendar();
     saveData();
-    toast('I turni di questo mese sono stati svuotati. Gli altri mesi rimangono intatti.', 'info');
+
+    // Sincronizar exclusão com o cloud: remove linhas do mês+ano na aba Escala
+    try {
+        const cloudMonth = String(m + 1); // 1-12 base Sheets
+        const escalaUrl = `${GOOGLE_API_URL}?action=bulkWrite&sheetName=Escala&apiKey=${API_KEY}`;
+        await fetch(escalaUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+                clearFilter: [
+                    { column: 'month', value: cloudMonth },
+                    { column: 'year', value: String(y) }
+                ],
+                rows: []
+            })
+        });
+        toast('Turni del mese cancellati localmente e dal cloud.', 'success');
+        console.log(`[CLEAR] Escala mese ${cloudMonth}/${y} rimossa dal cloud.`);
+    } catch (e) {
+        console.error('[CLEAR] Errore nella cancellazione cloud:', e);
+        toast('Turni cancellati localmente, ma errore nella sincronizzazione cloud. Ri-pubblica per allineare.', 'warning');
+    }
 }
 
 function swapNurses(nurseA_id, nurseB_id) {
@@ -2741,6 +2762,95 @@ function renderMonthlyReport() {
                 </tr>`).join('')}
                 </tbody>
             </table>
+            </div>
+        </div>
+
+        <!-- Bilancio Ore: Dovute vs Effettive -->
+        <div class="report-section">
+            <h3>⚖️ Bilancio Ore: Dovute vs Effettive</h3>
+            <p style="font-size:12px; color:var(--text-3); margin-bottom:12px;">Ore dovute calcolate su ${giorniFeriali} giorni feriali × 7.5h = ${oreDovute.toFixed(1)}h standard</p>
+            <div style="overflow-x:auto;">
+            <table class="rpt-table">
+                <thead><tr>
+                    <th style="text-align:left">Infermiera</th>
+                    <th>Ore Dovute</th>
+                    <th>Ore Effettive</th>
+                    <th>Differenza</th>
+                    <th>Ore Ferie</th>
+                    <th>Ore Malattia</th>
+                </tr></thead>
+                <tbody>
+                ${nurseData.map(nd => {
+                    const diff = nd.differenza;
+                    const diffColor = diff > 0 ? 'var(--success)' : diff < 0 ? 'var(--danger)' : 'var(--text-2)';
+                    const diffSign = diff > 0 ? '+' : '';
+                    return `<tr>
+                        <td style="text-align:left">${nd.nurse.name}</td>
+                        <td>${nd.oreDovute.toFixed(1)}h</td>
+                        <td><strong>${nd.totalH.toFixed(1)}h</strong></td>
+                        <td style="color:${diffColor}; font-weight:700;">${diffSign}${diff.toFixed(1)}h</td>
+                        <td>${nd.oreFerie.toFixed(1)}h</td>
+                        <td>${nd.oreMalattia.toFixed(1)}h</td>
+                    </tr>`;
+                }).join('')}
+                </tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- Breakdown Ore: Diurno/Notturno × Feriale/Festivo -->
+        <div class="report-section">
+            <h3>📊 Ripartizione Ore Diurne/Notturne</h3>
+            <div style="overflow-x:auto;">
+            <table class="rpt-table">
+                <thead><tr>
+                    <th style="text-align:left">Infermiera</th>
+                    <th>Diurne Feriali</th>
+                    <th>Diurne Festive</th>
+                    <th>Notturne Feriali</th>
+                    <th>Notturne Festive</th>
+                    <th>Totale</th>
+                </tr></thead>
+                <tbody>
+                ${nurseData.map(nd => {
+                    const tot = nd.oreDiurneFeriali + nd.oreDiurneFestive + nd.oreNotturneFeriali + nd.oreNotturneFestive;
+                    return `<tr>
+                        <td style="text-align:left">${nd.nurse.name}</td>
+                        <td>${nd.oreDiurneFeriali.toFixed(1)}h</td>
+                        <td>${nd.oreDiurneFestive.toFixed(1)}h</td>
+                        <td>${nd.oreNotturneFeriali.toFixed(1)}h</td>
+                        <td>${nd.oreNotturneFestive.toFixed(1)}h</td>
+                        <td><strong>${tot.toFixed(1)}h</strong></td>
+                    </tr>`;
+                }).join('')}
+                </tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- Copertura Giornaliera -->
+        <div class="report-section">
+            <h3>📅 Copertura Giornaliera</h3>
+            <p style="font-size:12px; color:var(--text-3); margin-bottom:12px;">Turni attivi per giorno. Feriali: 4 attesi | Festivi: 3 attesi</p>
+            <div style="display:flex; flex-wrap:wrap; gap:4px;">
+            ${dailyCoverage.map(dc => {
+                const ok = dc.count >= dc.expected;
+                const bg = ok ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.2)';
+                const border = ok ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.5)';
+                const textColor = ok ? 'var(--success)' : 'var(--danger)';
+                const dayNames = ['D','L','M','M','G','V','S'];
+                const dow = new Date(y, m, dc.day).getDay();
+                return `<div style="
+                    display:flex; flex-direction:column; align-items:center; justify-content:center;
+                    width:36px; height:48px; border-radius:8px;
+                    background:${bg}; border:1px solid ${border};
+                    font-size:10px; font-weight:600;
+                " title="Giorno ${dc.day} (${dc.fest?'Festivo':'Feriale'}): ${dc.count}/${dc.expected} turni${dc.count < dc.expected ? ' ⚠️ SCOPERTO' : ''}&#10;${Object.entries(dc.shifts).map(([k,v]) => k+':'+v).join(', ')}">
+                    <span style="font-size:9px; opacity:0.6;">${dayNames[dow]}</span>
+                    <span style="font-size:14px; font-weight:800; color:${textColor};">${dc.count}</span>
+                    <span style="font-size:8px; opacity:0.5;">${dc.day}</span>
+                </div>`;
+            }).join('')}
             </div>
         </div>
 
