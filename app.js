@@ -5,7 +5,7 @@
 // ============================================================
 
 // ── CONFIG ────────────────────────────────────────────────────
-const APP_CACHE_VERSION = 'v2.3'; // Incrementar para forçar resync do cloud
+const APP_CACHE_VERSION = 'v2.4'; // Incrementar para forçar resync do cloud (n4 restore migration)
 const COORD_PASS  = 'coord2026';
 const NURSE_PASS  = 'enfermeira123';
 const GOOGLE_API_URL = 'https://script.google.com/macros/s/AKfycbw7Hzr4C0V7cIM0pnU7ehbT3rpiwg-BTBpb7hnkgzIICYIbf8tBHXdjw82bFzTVVh2XxA/exec';
@@ -186,7 +186,91 @@ function loadData() {
         if (r) requests = JSON.parse(r);
         console.log('[LOAD] Dati locali caricati:', NURSES.length, 'infermiere,', Object.keys(schedule).length, 'turni in schedule');
         console.log('[LOAD] NURSES IDs:', NURSES.map(n => `"${n.id}"`).join(', '));
+
+        // ── MIGRATION: Restaura Melissa Alves (n4) a partir de abril/2026 ──
+        // Gated por flag no localStorage para rodar apenas uma vez
+        try {
+            const MIGRATION_FLAG = 'escala_migration_n4_restore_v1';
+            if (!localStorage.getItem(MIGRATION_FLAG)) {
+                // Garante que n4 existe em NURSES
+                let hasN4 = NURSES.find(n => String(n.id).trim() === 'n4');
+                if (!hasN4) {
+                    NURSES.push({ id:'n4', name:'Alves Festa Melissa', initials:'AM', nightQuota:5 });
+                    localStorage.setItem('escala_nurses', JSON.stringify(NURSES));
+                    console.log('[MIGRATION n4] Infermiera Melissa Alves (n4) riaggiunta a NURSES');
+                }
+                // Adiciona n4 em todos os meses >= abril/2026 (month=3, year=2026)
+                const threshold = 2026 * 12 + 3; // April/2026
+                let changed = false;
+                Object.keys(monthlyOrder || {}).forEach(key => {
+                    const parts = key.split('_');
+                    if (parts.length !== 2) return;
+                    const mm = parseInt(parts[0], 10);
+                    const yy = parseInt(parts[1], 10);
+                    if (isNaN(mm) || isNaN(yy)) return;
+                    const ordVal = yy * 12 + mm;
+                    if (ordVal >= threshold) {
+                        const arr = Array.isArray(monthlyOrder[key]) ? monthlyOrder[key] : [];
+                        if (!arr.includes('n4')) {
+                            arr.push('n4');
+                            monthlyOrder[key] = arr;
+                            changed = true;
+                            console.log(`[MIGRATION n4] n4 aggiunto a monthlyOrder[${key}]`);
+                        }
+                    }
+                });
+                if (changed) {
+                    localStorage.setItem('escala_monthlyOrder', JSON.stringify(monthlyOrder));
+                }
+                localStorage.setItem(MIGRATION_FLAG, '1');
+                console.log('[MIGRATION n4] Completata ripristino Melissa Alves da aprile/2026 in poi');
+            }
+        } catch (migErr) {
+            console.error('[MIGRATION n4] Errore nella migrazione:', migErr);
+        }
     } catch(e) { console.error('Erro ao carregar dados locais', e); }
+}
+
+// ── UTILITY: Reattiva un'infermiera a partire da un mese specifico ──
+// Uso: reactivateNurseFromMonth('n4', 3, 2026)  // month é 0-indexed (3 = aprile)
+function reactivateNurseFromMonth(nurseId, fromMonth, fromYear) {
+    const nid = String(nurseId).trim();
+    if (!nid) return 0;
+    const defaults = {
+        n1:{ id:'n1', name:'Balla Sabina',        initials:'BS', nightQuota:5 },
+        n2:{ id:'n2', name:'Batista Bianca',      initials:'BB', nightQuota:5 },
+        n3:{ id:'n3', name:'De Carvalho Eduarda', initials:'CE', nightQuota:5 },
+        n4:{ id:'n4', name:'Alves Festa Melissa', initials:'AM', nightQuota:5 },
+        n5:{ id:'n5', name:'Delizzeti Sirlene',   initials:'DS', nightQuota:5 },
+        n6:{ id:'n6', name:'Moslih Miriam',       initials:'MM', nightQuota:5 },
+        n7:{ id:'n7', name:'Kocevska Kristina',   initials:'KK', nightQuota:5 }
+    };
+    if (!NURSES.find(n => String(n.id).trim() === nid) && defaults[nid]) {
+        NURSES.push(defaults[nid]);
+        localStorage.setItem('escala_nurses', JSON.stringify(NURSES));
+    }
+    const threshold = fromYear * 12 + fromMonth;
+    let touched = 0;
+    Object.keys(monthlyOrder || {}).forEach(key => {
+        const parts = key.split('_');
+        if (parts.length !== 2) return;
+        const mm = parseInt(parts[0], 10);
+        const yy = parseInt(parts[1], 10);
+        if (isNaN(mm) || isNaN(yy)) return;
+        if ((yy * 12 + mm) >= threshold) {
+            const arr = Array.isArray(monthlyOrder[key]) ? monthlyOrder[key] : [];
+            if (!arr.includes(nid)) {
+                arr.push(nid);
+                monthlyOrder[key] = arr;
+                touched++;
+            }
+        }
+    });
+    if (touched > 0) {
+        localStorage.setItem('escala_monthlyOrder', JSON.stringify(monthlyOrder));
+        console.log(`[reactivateNurseFromMonth] ${nid} aggiunto a ${touched} mesi`);
+    }
+    return touched;
 }
 
 // ── GOOGLE SHEETS API (CLOUD DB) ──────────────────────────────
@@ -507,22 +591,76 @@ async function syncRequestsFromCloud() {
                         local.approvedBy = cr.approvedBy || local.approvedBy;
                         isModified = true;
                     }
+                    // Repara nomes/IDs ausentes em requests antigas (ex.: o Mobile gravou só o ID
+                    // e a request foi cacheada localmente com nome vazio ANTES da correção)
+                    const crSwapId = String(cr.nurseIdcambio || cr.swapNurseId || cr.toNurseId || '').trim();
+                    const crSwapName = cr.nursecambio || cr.swapNurseName || cr.toNurseName || '';
+                    const crNurseId = String(cr.nurseId || '').trim();
+                    const crNurseName = cr.nurseName || '';
+
+                    // Garante ID do cambio preenchido
+                    if (crSwapId && !local.nurseIdcambio) { local.nurseIdcambio = crSwapId; isModified = true; }
+                    if (crSwapId && !local.swapNurseId)   { local.swapNurseId   = crSwapId; isModified = true; }
+                    if (crSwapId && !local.toNurseId)     { local.toNurseId     = crSwapId; isModified = true; }
+
+                    // Garante nome do cambio preenchido (cloud ou fallback via NURSES)
+                    if (!local.nursecambio || !local.swapNurseName || !local.toNurseName) {
+                        let resolvedSwapName = crSwapName;
+                        if (!resolvedSwapName && crSwapId) {
+                            const nFound = NURSES.find(n => String(n.id).trim() === crSwapId);
+                            if (nFound) resolvedSwapName = nFound.name;
+                        }
+                        if (resolvedSwapName) {
+                            if (!local.nursecambio)   local.nursecambio   = resolvedSwapName;
+                            if (!local.swapNurseName) local.swapNurseName = resolvedSwapName;
+                            if (!local.toNurseName)   local.toNurseName   = resolvedSwapName;
+                            isModified = true;
+                        }
+                    }
+
+                    // Repara também o solicitante se veio sem nome
+                    if (crNurseId && !local.nurseId) { local.nurseId = crNurseId; isModified = true; }
+                    if (!local.nurseName && !local.fromNurseName) {
+                        let resolvedReqName = crNurseName;
+                        if (!resolvedReqName && crNurseId) {
+                            const nFound = NURSES.find(n => String(n.id).trim() === crNurseId);
+                            if (nFound) resolvedReqName = nFound.name;
+                        }
+                        if (resolvedReqName) {
+                            local.nurseName = resolvedReqName;
+                            local.fromNurseName = resolvedReqName;
+                            isModified = true;
+                        }
+                    }
+
                     updatedRequests.push(local);
                 } else {
                     // Sanitiza datas vindas do cloud: Google Sheets pode retornar
                     // "2026-05-23T03:00:00Z" — o split('T')[0] garante "2026-05-23"
                     const rawDate = sanitizeDate(cr.startDate || cr.date || '');
                     // Mapeia os campos 'nursecambio' e 'nurseIdcambio' do Google Sheets para os campos internos do app
-                    const swapNurseName = cr.nursecambio || cr.swapNurseName || cr.toNurseName || '';
-                    const swapNurseId = cr.nurseIdcambio || cr.swapNurseId || cr.toNurseId || '';
+                    const swapNurseId = String(cr.nurseIdcambio || cr.swapNurseId || cr.toNurseId || '').trim();
+                    // Se o Mobile não gravou o nome (só o ID), resolvemos pelo NURSES local
+                    let swapNurseName = cr.nursecambio || cr.swapNurseName || cr.toNurseName || '';
+                    if (!swapNurseName && swapNurseId) {
+                        const nFound = NURSES.find(n => String(n.id).trim() === swapNurseId);
+                        if (nFound) swapNurseName = nFound.name;
+                    }
+                    // Também resolve o nome do solicitante caso só o ID tenha vindo
+                    let reqNurseName = cr.nurseName || '';
+                    const reqNurseId = String(cr.nurseId || '').trim();
+                    if (!reqNurseName && reqNurseId) {
+                        const nFound = NURSES.find(n => String(n.id).trim() === reqNurseId);
+                        if (nFound) reqNurseName = nFound.name;
+                    }
                     updatedRequests.push({
                         id: crId,
                         type: cr.type || 'OFF',
                         status: cr.status || 'pending',
-                        nurseId: cr.nurseId || '',
-                        fromNurseId: cr.nurseId || '',
-                        nurseName: cr.nurseName || '',
-                        fromNurseName: cr.nurseName || '',
+                        nurseId: reqNurseId,
+                        fromNurseId: reqNurseId,
+                        nurseName: reqNurseName,
+                        fromNurseName: reqNurseName,
                         toNurseName: swapNurseName,
                         swapNurseName: swapNurseName,
                         nursecambio: swapNurseName,
@@ -610,16 +748,16 @@ function applyApprovedRequests() {
             const swapDay = swapDate.getDate();
             if (swapDay < 1 || swapDay > days) return;
 
-            const nurseId = req.nurseId || req.fromNurseId;
-            const swapNurseId = req.swapNurseId;
+            // Resolve IDs aceitando tanto nomes do Mobile (nurseIdcambio) quanto do Local (swapNurseId/toNurseId)
+            const nurseId = String(req.nurseId || req.fromNurseId || '').trim();
+            const swapNurseId = String(req.nurseIdcambio || req.swapNurseId || req.toNurseId || '').trim();
             if (!nurseId || !swapNurseId) return;
 
             const shiftA = getShift(nurseId, swapDay);
             const shiftB = getShift(swapNurseId, swapDay);
-            // Só troca se os turnos ainda não foram trocados
-            if (shiftA !== shiftB && shiftA !== 'OFF' && shiftB !== 'OFF') {
-                // Verifica se a troca já foi aplicada comparando com o esperado
-                // Se nurseA ainda tem seu turno original, a troca não foi aplicada
+            // Só troca se os turnos ainda forem diferentes (se já foram trocados, shiftA===shiftB é improvável,
+            // mas se o swap foi feito manualmente resultando em turnos iguais, evitamos reaplicar)
+            if (shiftA !== shiftB) {
                 assign(nurseId, swapDay, shiftB);
                 assign(swapNurseId, swapDay, shiftA);
                 applied++;
@@ -638,14 +776,16 @@ function applyApprovedRequests() {
     }
 }
 
-// Publica apenas a escala do mês atual no cloud (sem tocar funcionários/requisições)
+// Publica apenas a escala do mês alvo no cloud (sem tocar funcionários/requisições)
+// IMPORTANTE: usa getShiftForMonth (não getShift) para que funcione mesmo quando
+// o mês alvo é DIFERENTE do currentMonth (ex.: aprovação de troca em outro mês)
 async function autoPublishMonth(m, y, days) {
     try {
         const displayNurses = getMonthlyNurses();
         const escalaRows = displayNurses.map(nurse => {
             const row = { nurseId: nurse.id, month: String(m + 1), year: String(y) };
             for (let d = 1; d <= 31; d++) {
-                row['d' + d] = d <= days ? getShift(nurse.id, d) : '';
+                row['d' + d] = d <= days ? getShiftForMonth(nurse.id, d, m, y) : '';
             }
             return row;
         });
@@ -2448,10 +2588,30 @@ async function appendRequestToCloud(req) {
 }
 
 function getReqDetails(req) {
-    let h = `<div class="req-detail-row"><span class="req-detail-icon">👤</span><strong>${req.nurseName||req.fromNurseName}</strong></div>`;
+    // Resolve nome do solicitante (se vier só o ID, busca em NURSES)
+    let solicitanteName = req.nurseName || req.fromNurseName || '';
+    if (!solicitanteName) {
+        const sId = String(req.nurseId || req.fromNurseId || '').trim();
+        if (sId) {
+            const nFound = NURSES.find(n => String(n.id).trim() === sId);
+            if (nFound) solicitanteName = nFound.name;
+        }
+    }
+    solicitanteName = solicitanteName || '—';
+
+    let h = `<div class="req-detail-row"><span class="req-detail-icon">👤</span><strong>${solicitanteName}</strong></div>`;
     if (req.type==='swap') {
-        // Nome da enfermeira de câmbio: prioriza nursecambio (coluna do Sheets), depois fallbacks internos
-        const cambioName = req.nursecambio || req.toNurseName || req.swapNurseName || '—';
+        // Nome da enfermeira de câmbio: prioriza nursecambio (coluna do Sheets), depois fallbacks internos,
+        // e por fim tenta resolver pelo nurseIdcambio/swapNurseId via NURSES (quando o Mobile gravou só o ID).
+        let cambioName = req.nursecambio || req.toNurseName || req.swapNurseName || '';
+        if (!cambioName) {
+            const cambioId = String(req.nurseIdcambio || req.swapNurseId || req.toNurseId || '').trim();
+            if (cambioId) {
+                const nFound = NURSES.find(n => String(n.id).trim() === cambioId);
+                if (nFound) cambioName = nFound.name;
+            }
+        }
+        cambioName = cambioName || '—';
         const fromShiftName = SHIFTS[req.fromShift]?.name || req.fromShift || '';
         const toShiftName = SHIFTS[req.toShift]?.name || req.toShift || '';
         // Data da troca: exibe a data da solicitação de câmbio
@@ -2557,8 +2717,45 @@ function approveRequest(id) {
         });
         renderOccurrences();
     } else if (req.type === 'swap') {
-        assign(req.fromNurseId, req.fromDay, req.toShift);
-        assign(req.toNurseId, req.toDay, req.fromShift);
+        // Resolve IDs: o Mobile grava em nurseId/nurseIdcambio, o Local em fromNurseId/toNurseId
+        const nurseAId = String(req.nurseId || req.fromNurseId || '').trim();
+        const nurseBId = String(req.nurseIdcambio || req.swapNurseId || req.toNurseId || '').trim();
+
+        // Data única da troca (o câmbio afeta APENAS este dia)
+        const swapDateStr = sanitizeDate(req.startDate || req.date || '');
+
+        if (nurseAId && nurseBId && swapDateStr) {
+            const swapDate = new Date(swapDateStr + 'T00:00:00');
+            const swapMonth = swapDate.getMonth();
+            const swapYear = swapDate.getFullYear();
+            const swapDay = swapDate.getDate();
+
+            // Usa chaves do schedule com o mês da TROCA (não o currentMonth)
+            // para que aprovação funcione mesmo se a coordenadora estiver vendo outro mês
+            const keyA = `${nurseAId}_${swapMonth}_${swapYear}_${swapDay}`;
+            const keyB = `${nurseBId}_${swapMonth}_${swapYear}_${swapDay}`;
+
+            // Se os campos fromShift/toShift vieram no pedido (request feita no Local), usa-os;
+            // caso contrário lê do schedule atual (Mobile não grava esses campos)
+            const shiftA = (req.fromShift && req.fromNurseId === nurseAId) ? req.fromShift : (schedule[keyA] || 'OFF');
+            const shiftB = (req.toShift   && req.toNurseId   === nurseBId) ? req.toShift   : (schedule[keyB] || 'OFF');
+
+            // Só troca se houver diferença (evita reaplicar um swap já aplicado)
+            if (shiftA !== shiftB) {
+                schedule[keyA] = shiftB;
+                schedule[keyB] = shiftA;
+                console.log(`[APPROVE SWAP] Dia ${swapDay}/${swapMonth+1}/${swapYear}: ${nurseAId}(${shiftA}) <-> ${nurseBId}(${shiftB})`);
+            } else {
+                console.log(`[APPROVE SWAP] Dia ${swapDay}/${swapMonth+1}/${swapYear}: turnos idênticos (${shiftA}), nada a trocar`);
+            }
+
+            // Guarda o mês alvo para publicar no cloud após o salvamento
+            req._swapAppliedMonth = swapMonth;
+            req._swapAppliedYear = swapYear;
+        } else {
+            console.warn('[APPROVE SWAP] Dados insuficientes — nurseAId:', nurseAId, 'nurseBId:', nurseBId, 'date:', swapDateStr);
+            toast('⚠️ Richiesta di cambio incompleta (manca ID o data).', 'warning');
+        }
     } else if (req.type === 'vacation') {
         const start = new Date(req.startDate+'T00:00:00');
         const end = new Date(req.endDate+'T00:00:00');
@@ -2574,15 +2771,26 @@ function approveRequest(id) {
     req.status = 'approved';
     req.approvedAt = new Date().toISOString();
     req.approvedBy = currentUser.name;
-    
+
     renderCalendar();
     saveData();
     renderRequests();
     updateBadge();
     toast('Richiesta Approvata', 'success');
-    
-    // Auto-sync: publicar alteração na nuvem imediatamente
+
+    // Auto-sync: publica o status da request na nuvem
     syncRequestToCloud(req);
+
+    // Se for uma troca aprovada, publica a escala do mês da troca no cloud
+    // para que o Mobile também veja a alteração (refresh automático)
+    if (req.type === 'swap' && req._swapAppliedMonth != null && req._swapAppliedYear != null) {
+        const m = req._swapAppliedMonth;
+        const y = req._swapAppliedYear;
+        const days = new Date(y, m + 1, 0).getDate();
+        autoPublishMonth(m, y, days);
+        delete req._swapAppliedMonth;
+        delete req._swapAppliedYear;
+    }
 }
 
 function rejectRequest(id) {
@@ -3619,7 +3827,7 @@ function addNewNurse() {
     } else {
         init = name.substring(0, 2).toUpperCase();
     }
-    
+
     // Default Quota (handled dynamically by system anyway)
     const nQuota = 5;
 
@@ -3637,7 +3845,7 @@ function addNewNurse() {
             monthlyOrder[mo].push(newId);
         }
     }
-    
+
     // Certifique-se de que a array do mes atual existe:
     let currK = `${currentMonth.getMonth()}_${currentMonth.getFullYear()}`;
     if (!monthlyOrder[currK]) {
@@ -3649,7 +3857,7 @@ function addNewNurse() {
     renderActiveNursesList();
     renderCalendar();
     toast(`${name} aggiunto con successo!`, 'success');
-    
+
     document.getElementById('newNurseName').value = '';
 }
 
@@ -3658,7 +3866,7 @@ function removeNurseGlobally(nurseId) {
     if (!confirm(`Desideri rimuovere ${nurse?.name} dai turni a partire DAL MESE ATTUALE? I mesi vecchi in cui ha lavorato rimarranno intatti, ma non farà più parte del team nelle prossime settimane.`)) return;
 
     let targetVal = currentMonth.getFullYear() * 12 + currentMonth.getMonth();
-    
+
     // Remove do current month e de TODOS os meses do futuro que já foram visitados e guardados
     for (let mo in monthlyOrder) {
         let [mStr, yStr] = mo.split('_');
