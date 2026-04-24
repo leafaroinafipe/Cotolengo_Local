@@ -5,7 +5,7 @@
 // ============================================================
 
 // ── CONFIG ────────────────────────────────────────────────────
-const APP_CACHE_VERSION = 'v2.4'; // Incrementar para forçar resync do cloud (n4 restore migration)
+const APP_CACHE_VERSION = 'v2.5'; // Incrementar para forçar resync do cloud (gen: considera últimos 4 dias do mês anterior)
 const COORD_PASS  = 'coord2026';
 const NURSE_PASS  = 'enfermeira123';
 const GOOGLE_API_URL = 'https://script.google.com/macros/s/AKfycbw7Hzr4C0V7cIM0pnU7ehbT3rpiwg-BTBpb7hnkgzIICYIbf8tBHXdjw82bFzTVVh2XxA/exec';
@@ -1329,9 +1329,47 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
     const hasVacations = occurrences.length > 0;
     const MAX_CONSEC = hasVacations ? 4 : 3;
 
+    // ── CONTEXTO DOS ÚLTIMOS 4 DIAS DO MÊS ANTERIOR ──
+    // Permite que o gerador respeite regras de progressão (ex.: N → OFF → OFF)
+    // quando os primeiros dias do mês atual dependem do final do mês anterior.
+    // Mapeamento: day=0 → último dia do mês anterior, day=-1 → penúltimo, day=-2, day=-3.
+    const prevM = m === 0 ? 11 : m - 1;
+    const prevY = m === 0 ? y - 1 : y;
+    const prevMonthDaysCount = new Date(prevY, prevM + 1, 0).getDate();
+    const prevContext = {}; // { nurseId: { '0': code, '-1': code, '-2': code, '-3': code } }
+    try {
+        NURSES.forEach(n => {
+            prevContext[n.id] = {};
+            for (let off = 0; off <= 3; off++) {
+                const pDay = prevMonthDaysCount - off;
+                if (pDay < 1) continue;
+                const code = getShiftForMonth(n.id, pDay, prevM, prevY);
+                // Só registra se houver dado real (diferente do default 'OFF') para não impor OFF fictício
+                const key = `${String(n.id).trim()}_${prevM}_${prevY}_${pDay}`;
+                if (schedule.hasOwnProperty(key) && code) {
+                    prevContext[n.id][-off] = code;
+                }
+            }
+        });
+        console.log('[GEN] Contexto últimos 4 dias mês anterior carregado:', Object.keys(prevContext).length, 'enfermeiros');
+    } catch (prevErr) {
+        console.warn('[GEN] Falha ao carregar contexto do mês anterior:', prevErr);
+    }
+
     // Métodos Contextuais Temporários (Trabalham apenas em um objeto genérico, rápido para simulação RAM)
-    function getSh(simObj, nId, d) { return simObj[`${nId}_${m}_${y}_${d}`]; }
-    function setSh(simObj, nId, d, code) { simObj[`${nId}_${m}_${y}_${d}`] = code; }
+    function getSh(simObj, nId, d) {
+        // Para dias <= 0, consulta o contexto dos últimos 4 dias do mês anterior
+        if (d <= 0) {
+            const ctx = prevContext[nId];
+            return ctx ? ctx[d] : undefined;
+        }
+        return simObj[`${nId}_${m}_${y}_${d}`];
+    }
+    function setSh(simObj, nId, d, code) {
+        // Nunca escreve no passado (mês anterior é somente leitura)
+        if (d <= 0) return;
+        simObj[`${nId}_${m}_${y}_${d}`] = code;
+    }
 
     function nurseHoursTemp(simObj, nId) {
         let h = 0;
@@ -1343,7 +1381,8 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
     function canWorkConsecTemp(simObj, nId, day) {
         let count = 1;
         let d = day - 1;
-        while (d >= 1 && getSh(simObj, nId, d) && !['OFF','FE','AT'].includes(getSh(simObj, nId, d))) { count++; d--; }
+        // Limite inferior: -3 para consultar os últimos 4 dias do mês anterior (offsets 0,-1,-2,-3)
+        while (d >= -3 && getSh(simObj, nId, d) && !['OFF','FE','AT'].includes(getSh(simObj, nId, d))) { count++; d--; }
         d = day + 1;
         // Look ahead vai até simDays no contínuo dos plantões
         while (d <= simDays && getSh(simObj, nId, d) && !['OFF','FE','AT'].includes(getSh(simObj, nId, d))) { count++; d++; }
@@ -1352,7 +1391,7 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
         // Limite restritivo de fadiga - Bloco grande único
         if (count >= 4) {
             let startS = day;
-            while(startS > 1 && getSh(simObj, nId, startS-1) && !['OFF','FE','AT'].includes(getSh(simObj, nId, startS-1))) startS--;
+            while(startS > -3 && getSh(simObj, nId, startS-1) && !['OFF','FE','AT'].includes(getSh(simObj, nId, startS-1))) startS--;
             let endS = day;
             while(endS < simDays && getSh(simObj, nId, endS+1) && !['OFF','FE','AT'].includes(getSh(simObj, nId, endS+1))) endS++;
             let otherBlocks = 0;
@@ -1373,23 +1412,26 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
     function checkTransitions(simObj, nId, day, code) {
         const morningShifts = ['M1', 'M2', 'MF', 'G'];
         const afternoonShifts = ['P', 'PF'];
-        const prev = day > 1 ? getSh(simObj, nId, day - 1) : null;
+        // Consulta dia anterior (inclui dias -3..0 vindos do mês anterior)
+        const prev = getSh(simObj, nId, day - 1) || null;
         const next = day < simDays ? getSh(simObj, nId, day + 1) : null;
         if (morningShifts.includes(code) && afternoonShifts.includes(prev)) return false;
         if (afternoonShifts.includes(code) && morningShifts.includes(next)) return false;
         if (afternoonShifts.includes(code) && (afternoonShifts.includes(prev) || afternoonShifts.includes(next))) return false;
+        // Regra N → OFF: após um turno de noite, o dia seguinte deve ser repouso
+        if (prev === 'N' && !['OFF','FE','AT'].includes(code)) return false;
         return true;
     }
 
     function canAssignTemp(simObj, nId, day, code) {
         if (!code || ['OFF', 'FE', 'AT'].includes(code)) return true;
         if (!checkTransitions(simObj, nId, day, code)) return false;
-        
-        // Impede ilhas de 1 dia isolado para descanso (EXCETO dia 1 do mês - sem contexto anterior)
-        const prev = day > 1 ? getSh(simObj, nId, day - 1) : null;
-        if (day > 1 && prev && ['OFF', 'FE', 'AT'].includes(prev)) {
-            const prev2 = day > 2 ? getSh(simObj, nId, day - 2) : null;
-            if (prev2 && !['OFF', 'FE', 'AT'].includes(prev2)) return false; 
+
+        // Impede ilhas de 1 dia isolado para descanso — agora considera também os últimos 4 dias do mês anterior
+        const prev = getSh(simObj, nId, day - 1);
+        if (prev && ['OFF', 'FE', 'AT'].includes(prev)) {
+            const prev2 = getSh(simObj, nId, day - 2);
+            if (prev2 && !['OFF', 'FE', 'AT'].includes(prev2)) return false;
         }
         return true;
     }
@@ -1481,7 +1523,8 @@ async function generateSchedule(hourLimits = {}, startDay = 1) {
             const dow = new Date(y, m, d).getDay();
             
             // Reespelhamento de domingo/sábado
-            if (dow === 0 && d > 1) { 
+            // Permite d === 1 também: se o último dia do mês anterior foi N, o domingo do novo mês espelha.
+            if (dow === 0) {
                 NURSES.forEach(n => {
                     if (getSh(tSched, n.id, d-1) === 'N') {
                         if (!['FE', 'AT'].includes(getSh(tSched, n.id, d))) {
@@ -2500,7 +2543,9 @@ function renderRequests() {
     };
 
     const mapCard = (req) => {
-        const canDelete = isCoordinator || (req.nurseId===currentUser.id||req.fromNurseId===currentUser.id);
+        // Solo le richieste ancora in attesa possono essere eliminate.
+        // Una volta approvate o rifiutate restano nello storico come log immutabile.
+        const canDelete = req.status === 'pending' && (isCoordinator || (req.nurseId===currentUser.id||req.fromNurseId===currentUser.id));
         const canApprove = isCoordinator && req.status === 'pending';
         let waitingHtml = '';
         if (req.status === 'pending') {
@@ -2688,6 +2733,14 @@ async function syncAllRequestsToCloud() {
 }
 
 function deleteRequest(id) {
+    // Difesa in profondità: non si può eliminare una richiesta già approvata o rifiutata.
+    // Lo storico delle decisioni deve restare tracciabile.
+    const target = requests.find(r => String(r.id) === String(id));
+    if (!target) { toast('Richiesta non trovata', 'error'); return; }
+    if (target.status !== 'pending') {
+        toast('Non puoi eliminare una richiesta già approvata o rifiutata', 'warning');
+        return;
+    }
     requests = requests.filter(r=>String(r.id)!==String(id));
     renderRequests();
     updateBadge();
