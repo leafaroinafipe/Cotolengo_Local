@@ -5,7 +5,7 @@
 // ============================================================
 
 // ── CONFIG ────────────────────────────────────────────────────
-const APP_CACHE_VERSION = 'v2.5'; // Incrementar para forçar resync do cloud (gen: considera últimos 4 dias do mês anterior)
+const APP_CACHE_VERSION = 'v2.7'; // Incrementar para forçar resync do cloud (feat: swap cross-date 4-cell)
 const COORD_PASS  = 'coord2026';
 const NURSE_PASS  = 'enfermeira123';
 const GOOGLE_API_URL = 'https://script.google.com/macros/s/AKfycbw7Hzr4C0V7cIM0pnU7ehbT3rpiwg-BTBpb7hnkgzIICYIbf8tBHXdjw82bFzTVVh2XxA/exec';
@@ -56,6 +56,7 @@ let currentUser   = null;
 let isCoordinator = false;
 let schedule      = {};   // key: `${nurseId}_${month}_${year}_${day}` → shiftCode
 let requests      = [];
+let editingRequestId = null; // ID della richiesta attualmente in modifica (null = nessuna)
 let currentMonth  = new Date();
 currentMonth.setDate(1); // Força dia 1 para evitar pular mês em dias 31
 let selectedCell  = null;
@@ -383,6 +384,11 @@ async function publishToCloud() {
             startDate: r.startDate || r.date || '',
             endDate: r.endDate || r.startDate || r.date || '',
             desc: r.desc || r.reason || '',
+            // Nuove colonne per swap cross-date (vuote per tipi diversi da swap)
+            dataRichiedente: r.dataRichiedente || '',
+            dataCambio: r.dataCambio || '',
+            turnoRichiedente: r.turnoRichiedente || '',
+            turnoCambio: r.turnoCambio || '',
             createdAt: r.createdAt || '',
             approvedAt: r.approvedAt || '',
             approvedBy: r.approvedBy || ''
@@ -653,6 +659,11 @@ async function syncRequestsFromCloud() {
                         const nFound = NURSES.find(n => String(n.id).trim() === reqNurseId);
                         if (nFound) reqNurseName = nFound.name;
                     }
+                    // Nuove colonne swap cross-date dal cloud
+                    const dataRichiedenteIso = sanitizeDate(cr.dataRichiedente || '');
+                    const dataCambioIso      = sanitizeDate(cr.dataCambio || '');
+                    const turnoRichiedente   = String(cr.turnoRichiedente || '').trim();
+                    const turnoCambio        = String(cr.turnoCambio || '').trim();
                     updatedRequests.push({
                         id: crId,
                         type: cr.type || 'OFF',
@@ -672,6 +683,11 @@ async function syncRequestsFromCloud() {
                         endDate: sanitizeDate(cr.endDate || ''),
                         desc: cr.desc || '',
                         reason: cr.desc || '',
+                        // Campi swap cross-date
+                        dataRichiedente: dataRichiedenteIso,
+                        dataCambio: dataCambioIso,
+                        turnoRichiedente: turnoRichiedente,
+                        turnoCambio: turnoCambio,
                         createdAt: cr.createdAt || new Date().toISOString(),
                         approvedAt: cr.approvedAt || '',
                         approvedBy: cr.approvedBy || ''
@@ -739,29 +755,77 @@ function applyApprovedRequests() {
                 }
             }
         }
-        // Requisições de troca (swap)
+        // Requisições de troca (swap) — supporta cross-date (4-cell symmetric swap)
         else if (req.type === 'swap') {
-            const swapDateStr = sanitizeDate(req.startDate || req.date || '');
-            if (!swapDateStr) return;
-            const swapDate = new Date(swapDateStr + 'T00:00:00');
-            if (swapDate.getMonth() !== m || swapDate.getFullYear() !== y) return;
-            const swapDay = swapDate.getDate();
-            if (swapDay < 1 || swapDay > days) return;
+            // Já aplicado nesta sessão? pula (idempotência local)
+            if (req.autoApplied === true) return;
 
-            // Resolve IDs aceitando tanto nomes do Mobile (nurseIdcambio) quanto do Local (swapNurseId/toNurseId)
-            const nurseId = String(req.nurseId || req.fromNurseId || '').trim();
+            // Resolve IDs aceitando nomes do Mobile (nurseIdcambio) e do Local (swapNurseId/toNurseId)
+            const nurseId     = String(req.nurseId     || req.fromNurseId || '').trim();
             const swapNurseId = String(req.nurseIdcambio || req.swapNurseId || req.toNurseId || '').trim();
             if (!nurseId || !swapNurseId) return;
 
-            const shiftA = getShift(nurseId, swapDay);
-            const shiftB = getShift(swapNurseId, swapDay);
-            // Só troca se os turnos ainda forem diferentes (se já foram trocados, shiftA===shiftB é improvável,
-            // mas se o swap foi feito manualmente resultando em turnos iguais, evitamos reaplicar)
-            if (shiftA !== shiftB) {
-                assign(nurseId, swapDay, shiftB);
-                assign(swapNurseId, swapDay, shiftA);
-                applied++;
+            // Datas: dataRichiedente = data ceduta dal richiedente; dataCambio = data ceduta dalla controparte.
+            // Retrocompatibilidade: swaps antigos só têm startDate/date (uma única data).
+            const fromDateStr = sanitizeDate(req.dataRichiedente || req.startDate || req.date || '');
+            const toDateStr   = sanitizeDate(req.dataCambio      || req.startDate || req.date || '');
+            if (!fromDateStr || !toDateStr) return;
+
+            const fromDate = new Date(fromDateStr + 'T00:00:00');
+            const toDate   = new Date(toDateStr   + 'T00:00:00');
+            // Ambas as datas devem estar no mês atual para aplicar atomicamente
+            if (fromDate.getMonth() !== m || fromDate.getFullYear() !== y) return;
+            if (toDate.getMonth()   !== m || toDate.getFullYear()   !== y) return;
+            const fromDay = fromDate.getDate();
+            const toDay   = toDate.getDate();
+            if (fromDay < 1 || fromDay > days || toDay < 1 || toDay > days) return;
+
+            const snapFrom = String(req.turnoRichiedente || '').trim();
+            const snapTo   = String(req.turnoCambio      || '').trim();
+
+            // ── SAME-DAY SWAP (legado ou cross-date que calhou no mesmo dia) ──
+            if (fromDay === toDay) {
+                const shiftA = getShift(nurseId,     fromDay);
+                const shiftB = getShift(swapNurseId, fromDay);
+                if (shiftA !== shiftB) {
+                    assign(nurseId,     fromDay, shiftB);
+                    assign(swapNurseId, fromDay, shiftA);
+                    req.autoApplied = true;
+                    applied++;
+                }
+                return;
             }
+
+            // ── CROSS-DATE SWAP: 4-cell symmetric swap ──
+            const reqOnFrom = getShift(nurseId,     fromDay);
+            const cpOnFrom  = getShift(swapNurseId, fromDay);
+            const reqOnTo   = getShift(nurseId,     toDay);
+            const cpOnTo    = getShift(swapNurseId, toDay);
+
+            // Detecta se já foi aplicado (estado post-swap matching snapshots)
+            if (snapFrom && snapTo && cpOnFrom === snapFrom && reqOnTo === snapTo) {
+                req.autoApplied = true;
+                return;
+            }
+
+            // Se há snapshots, valida estado pré-swap antes de aplicar
+            if (snapFrom && snapTo) {
+                if (reqOnFrom !== snapFrom || cpOnTo !== snapTo) {
+                    console.warn(`[AUTO-APPLY] Swap ${req.id}: stato incoerente con snapshot, saltato.`, {
+                        atteso: { reqOnFrom: snapFrom, cpOnTo: snapTo },
+                        trovato: { reqOnFrom, cpOnTo }
+                    });
+                    return;
+                }
+            }
+
+            // Aplica 4-cell symmetric swap
+            assign(nurseId,     fromDay, cpOnFrom);
+            assign(swapNurseId, fromDay, reqOnFrom);
+            assign(nurseId,     toDay,   cpOnTo);
+            assign(swapNurseId, toDay,   reqOnTo);
+            req.autoApplied = true;
+            applied++;
         }
     });
 
@@ -2194,6 +2258,12 @@ function openSwapRequest() {
     closeDayModal();
     if (!selectedCell) return;
     const code = getShift(selectedCell.nurseId, selectedCell.day);
+    // Mostra la data del richiedente (derivata dalla cella cliccata)
+    const fromDateObj = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), selectedCell.day);
+    const fromDateIso = `${fromDateObj.getFullYear()}-${String(fromDateObj.getMonth()+1).padStart(2,'0')}-${String(fromDateObj.getDate()).padStart(2,'0')}`;
+    const fromDateLabel = fromDateObj.toLocaleDateString('it-IT', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+    document.getElementById('swapFromDateDisplay').value = fromDateLabel;
+    document.getElementById('swapFromDateDisplay').dataset.iso = fromDateIso;
     document.getElementById('currentShiftDisplay').value = `${code} — ${SHIFTS[code].name}`;
     const sel = document.getElementById('swapNurseSelect');
     sel.innerHTML = '<option value="">— Seleziona —</option>' +
@@ -2258,36 +2328,62 @@ function closeSwapModal(e) {
 
 function submitSwapRequest() {
     const nurseId = document.getElementById('swapNurseSelect').value;
-    const dateStr = document.getElementById('swapDateInput').value;
+    const dateStr = document.getElementById('swapDateInput').value; // data della controparte
     if (!nurseId||!dateStr) { toast('Compila tutti i campi','warning'); return; }
-    const d = new Date(dateStr+'T00:00:00');
-    if (d.getMonth()!==currentMonth.getMonth()) { toast('Data fuori dal mese attuale','error'); return; }
-    const toDay    = d.getDate();
+    const dTo = new Date(dateStr+'T00:00:00');
+    if (dTo.getMonth()!==currentMonth.getMonth()) { toast('Data fuori dal mese attuale','error'); return; }
+    const toDay    = dTo.getDate();
     const toShift  = getShift(nurseId, toDay);
-    const fromShift= getShift(selectedCell.nurseId, selectedCell.day);
+    const fromDay  = selectedCell.day;
+    const fromShift= getShift(selectedCell.nurseId, fromDay);
     const toNurse  = NURSES.find(n=>n.id===nurseId);
 
+    // Impedisce swap tra celle identiche (stessa data + stesso turno finirebbe in no-op)
+    if (String(fromDay) === String(toDay) && fromShift === toShift) {
+        toast('I turni sono uguali, nulla da scambiare','warning'); return;
+    }
+    // Validazione: la controparte deve avere effettivamente un turno assegnato
+    if (!toShift || toShift === '') {
+        toast('La controparte non ha un turno in questa data','error'); return;
+    }
+
+    // Costruisce le date ISO (YYYY-MM-DD) di entrambe le parti
+    const fromDateObj = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), fromDay);
+    const fromDateIso = `${fromDateObj.getFullYear()}-${String(fromDateObj.getMonth()+1).padStart(2,'0')}-${String(fromDateObj.getDate()).padStart(2,'0')}`;
+    const toDateIso   = dateStr;
+
     const st = 'pending'; // Força o registro como pendente, até para Coordenadores.
-    
-    // Altera o calendário imediatamente apenas se for Coordenador (autoritário)
+
+    // Altera o calendário imediatamente apenas se for Coordenador (autoritário) — ora con swap incrociato 4 celle
     if (st === 'approved') {
-        assign(selectedCell.nurseId, selectedCell.day, toShift);
-        assign(nurseId, toDay, fromShift);
+        const reqCellOnFrom = getShift(selectedCell.nurseId, fromDay);   // = fromShift
+        const cpCellOnFrom  = getShift(nurseId, fromDay);
+        const reqCellOnTo   = getShift(selectedCell.nurseId, toDay);
+        const cpCellOnTo    = getShift(nurseId, toDay);                  // = toShift
+        assign(selectedCell.nurseId, fromDay, cpCellOnFrom);
+        assign(nurseId,              fromDay, reqCellOnFrom);
+        assign(selectedCell.nurseId, toDay,   cpCellOnTo);
+        assign(nurseId,              toDay,   reqCellOnTo);
         renderCalendar();
     }
 
-    const swapDateStr = document.getElementById('swapDateInput').value;
     requests.push({
         id: generateId(), type:'swap', status: st,
         fromNurseId: selectedCell.nurseId, fromNurseName: currentUser.name,
-        fromDay: selectedCell.day, fromShift,
+        fromDay, fromShift,
         toNurseId: nurseId, toNurseName: toNurse.name,
         nursecambio: toNurse.name, swapNurseName: toNurse.name,
         swapNurseId: nurseId,
         toDay, toShift,
-        startDate: swapDateStr, date: swapDateStr,
+        // Nuove colonne standard per il cloud (sheet Solicitacoes)
+        dataRichiedente: fromDateIso,
+        dataCambio: toDateIso,
+        turnoRichiedente: fromShift,
+        turnoCambio: toShift,
+        // Retrocompat: `date` / `startDate` ora puntano alla data della controparte (comportamento pre-esistente)
+        startDate: toDateIso, date: toDateIso,
         createdAt: new Date().toISOString(),
-        approvedAt: st === 'approved' ? new Date().toISOString() : null, 
+        approvedAt: st === 'approved' ? new Date().toISOString() : null,
         approvedBy: st === 'approved' ? 'Coordenadora' : null
     });
     closeSwapModal();
@@ -2467,6 +2563,167 @@ function submitManualRequest() {
     renderRequests();
 }
 
+// ── EDIT REQUEST (solo richieste in attesa) ───────────────────
+function openEditRequestModal(id) {
+    const req = requests.find(r => String(r.id) === String(id));
+    if (!req) { toast('Richiesta non trovata', 'error'); return; }
+    if (req.status !== 'pending') {
+        toast('Puoi modificare solo richieste ancora in attesa', 'warning');
+        return;
+    }
+    // Verifica permessi: coordinatore o proprietario della richiesta
+    const isOwner = (req.nurseId === currentUser.id) || (req.fromNurseId === currentUser.id);
+    if (!isCoordinator && !isOwner) {
+        toast('Non hai i permessi per modificare questa richiesta', 'warning');
+        return;
+    }
+
+    editingRequestId = req.id;
+
+    // Tipo (readonly)
+    const typeLabels = { swap:'🔄 Cambio Turno', vacation:'🏖️ Ferie', justified:'📋 Riposo',
+                         unexcused:'⚠️ Assenza Ingiustificata',
+                         FE:'🏖️ Ferie Programmate', OFF:'📋 Riposo',
+                         OFF_INJ:'⚠️ Assenza Ingiustificata', AT:'🏥 Certificato/Licenza' };
+    document.getElementById('editReqTypeDisplay').value = typeLabels[req.type] || req.type;
+
+    // Personale (readonly)
+    const nurseName = req.nurseName || req.fromNurseName || '';
+    document.getElementById('editReqNurseDisplay').value = nurseName;
+
+    // Reset visibilità gruppi dinamici
+    const swapGroup = document.getElementById('editReqSwapNurseGroup');
+    const endGroup = document.getElementById('editReqEndDateGroup');
+    const reasonGroup = document.getElementById('editReqReasonGroup');
+    const startLabel = document.getElementById('editReqStartDateLabel');
+
+    swapGroup.style.display = 'none';
+    endGroup.style.display = 'none';
+    reasonGroup.style.display = 'none';
+    startLabel.textContent = 'Data';
+
+    // Configurazione per tipo
+    if (req.type === 'swap') {
+        // Per swap: data e controparte
+        const swapSel = document.getElementById('editReqSwapNurseSelect');
+        // Tutte le infermiere eccetto chi richiede
+        const requesterId = req.fromNurseId || req.nurseId;
+        swapSel.innerHTML = NURSES.filter(n => n.id !== requesterId)
+            .map(n => `<option value="${n.id}">${n.name}</option>`).join('');
+        const currentSwapId = req.toNurseId || req.swapNurseId || req.nurseIdcambio || '';
+        if (currentSwapId) swapSel.value = currentSwapId;
+        swapGroup.style.display = 'block';
+
+        const swapDate = req.date || req.startDate || '';
+        document.getElementById('editReqStartDate').value = swapDate ? String(swapDate).split('T')[0] : '';
+    } else if (req.type === 'vacation' || req.type === 'FE') {
+        // Ferie: intervallo date
+        startLabel.textContent = 'Data Inizio';
+        endGroup.style.display = 'block';
+        document.getElementById('editReqStartDate').value = req.startDate ? String(req.startDate).split('T')[0] : '';
+        document.getElementById('editReqEndDate').value = req.endDate ? String(req.endDate).split('T')[0] : '';
+    } else if (req.type === 'AT') {
+        // Certificato: intervallo date + motivo
+        startLabel.textContent = 'Data Inizio';
+        endGroup.style.display = 'block';
+        reasonGroup.style.display = 'block';
+        document.getElementById('editReqStartDate').value = req.startDate ? String(req.startDate).split('T')[0] : '';
+        document.getElementById('editReqEndDate').value = req.endDate ? String(req.endDate).split('T')[0] : '';
+        document.getElementById('editReqReason').value = req.reason || req.desc || '';
+    } else {
+        // justified / unexcused / OFF / OFF_INJ: data singola + motivo
+        reasonGroup.style.display = 'block';
+        const dateVal = req.date || req.startDate || '';
+        document.getElementById('editReqStartDate').value = dateVal ? String(dateVal).split('T')[0] : '';
+        document.getElementById('editReqReason').value = req.reason || req.desc || '';
+    }
+
+    document.getElementById('editRequestModal').classList.remove('hidden');
+}
+
+function closeEditRequestModal(e) {
+    if (e && e.target && !e.target.classList.contains('modal-bd')) return;
+    document.getElementById('editRequestModal').classList.add('hidden');
+    editingRequestId = null;
+}
+
+function submitEditRequest() {
+    if (!editingRequestId) { toast('Nessuna richiesta in modifica', 'error'); return; }
+    const req = requests.find(r => String(r.id) === String(editingRequestId));
+    if (!req) { toast('Richiesta non trovata', 'error'); editingRequestId = null; return; }
+    if (req.status !== 'pending') {
+        toast('Puoi modificare solo richieste ancora in attesa', 'warning');
+        editingRequestId = null;
+        return;
+    }
+
+    const startDate = document.getElementById('editReqStartDate').value;
+    const endDate = document.getElementById('editReqEndDate').value;
+    const reason = document.getElementById('editReqReason').value.trim();
+    const swapNurseId = document.getElementById('editReqSwapNurseSelect').value;
+
+    if (!startDate) { toast('Compila la data', 'warning'); return; }
+
+    if (req.type === 'swap') {
+        if (!swapNurseId) { toast('Seleziona la persona per il cambio', 'warning'); return; }
+        const swapNurse = NURSES.find(n => n.id === swapNurseId);
+        if (!swapNurse) { toast('Infermiera di cambio non trovata', 'error'); return; }
+        const d = new Date(startDate + 'T00:00:00');
+        req.date = startDate;
+        req.startDate = startDate;
+        req.toDay = d.getDate();
+        req.toNurseId = swapNurseId;
+        req.toNurseName = swapNurse.name;
+        req.swapNurseId = swapNurseId;
+        req.swapNurseName = swapNurse.name;
+        req.nursecambio = swapNurse.name;
+        req.nurseIdcambio = swapNurseId;
+        req.toShift = getShift(swapNurseId, d.getDate());
+    } else if (req.type === 'vacation' || req.type === 'FE') {
+        if (!endDate) { toast('Compila la data di fine', 'warning'); return; }
+        if (new Date(endDate) < new Date(startDate)) {
+            toast('La data di fine deve essere successiva a quella di inizio', 'error');
+            return;
+        }
+        req.startDate = startDate;
+        req.endDate = endDate;
+    } else if (req.type === 'AT') {
+        if (!endDate) { toast('Compila la data di fine', 'warning'); return; }
+        if (new Date(endDate) < new Date(startDate)) {
+            toast('La data di fine deve essere successiva a quella di inizio', 'error');
+            return;
+        }
+        req.startDate = startDate;
+        req.endDate = endDate;
+        req.reason = reason;
+        req.desc = reason;
+    } else {
+        // justified / unexcused / OFF / OFF_INJ
+        const d = new Date(startDate + 'T00:00:00');
+        req.date = startDate;
+        req.startDate = startDate;
+        req.day = d.getDate();
+        if (reason) req.reason = reason;
+        if (reason) req.desc = reason;
+    }
+
+    // Marca come modificata (timestamp opzionale)
+    req.modifiedAt = new Date().toISOString();
+
+    saveData();
+    renderRequests();
+    updateBadge();
+    document.getElementById('editRequestModal').classList.add('hidden');
+    editingRequestId = null;
+
+    // Sincronizzazione cloud
+    if (typeof syncAllRequestsToCloud === 'function') {
+        syncAllRequestsToCloud();
+    }
+
+    toast('✏️ Richiesta modificata', 'success');
+}
+
 // ── REQUEST FILTERS ───────────────────────────────────────────
 let reqStatusFilter = 'all';
 let reqNurseFilter = 'all';
@@ -2543,9 +2800,10 @@ function renderRequests() {
     };
 
     const mapCard = (req) => {
-        // Solo le richieste ancora in attesa possono essere eliminate.
+        // Solo le richieste ancora in attesa possono essere eliminate o modificate.
         // Una volta approvate o rifiutate restano nello storico come log immutabile.
         const canDelete = req.status === 'pending' && (isCoordinator || (req.nurseId===currentUser.id||req.fromNurseId===currentUser.id));
+        const canEdit = canDelete; // stessi permessi dell'eliminazione
         const canApprove = isCoordinator && req.status === 'pending';
         let waitingHtml = '';
         if (req.status === 'pending') {
@@ -2564,6 +2822,7 @@ function renderRequests() {
                 ${waitingHtml}
                 <div class="req-card-actions">
                     ${canApprove ? `<button class="req-action-btn btn-approve" onclick="approveRequest('${req.id}')">✅ Approva</button><button class="req-action-btn btn-reject" onclick="rejectRequest('${req.id}')">❌ Rifiuta</button>` : ''}
+                    ${canEdit ? `<button class="req-action-btn" style="background:rgba(59,130,246,0.1); color:#60a5fa; border:1px solid rgba(59,130,246,0.25);" onclick="openEditRequestModal('${req.id}')">✏️ Modifica</button>` : ''}
                     ${canDelete ? `<button class="req-action-btn" style="background:rgba(239,68,68,0.08); color:#f87171; border:1px solid rgba(239,68,68,0.2);" onclick="deleteRequest('${req.id}')">🗑 Elimina</button>` : ''}
                 </div>
             </div>
@@ -2657,18 +2916,31 @@ function getReqDetails(req) {
             }
         }
         cambioName = cambioName || '—';
-        const fromShiftName = SHIFTS[req.fromShift]?.name || req.fromShift || '';
-        const toShiftName = SHIFTS[req.toShift]?.name || req.toShift || '';
-        // Data da troca: exibe a data da solicitação de câmbio
-        const swapDateRaw = sanitizeDate(req.startDate || req.date || '');
-        const swapDateDisplay = swapDateRaw ? swapDateRaw.split('-').reverse().join('/') : '';
-        // Monta a linha de detalhes do câmbio
+        // Turni: prioriza snapshots turnoRichiedente/turnoCambio, fallback para fromShift/toShift (legado)
+        const fromShiftCode = req.turnoRichiedente || req.fromShift || '';
+        const toShiftCode   = req.turnoCambio      || req.toShift   || '';
+        const fromShiftName = SHIFTS[fromShiftCode]?.name || fromShiftCode || '';
+        const toShiftName   = SHIFTS[toShiftCode]?.name   || toShiftCode   || '';
+        // Datas: prioriza dataRichiedente/dataCambio (cross-date); fallback para startDate/date
+        const fromDateRaw = sanitizeDate(req.dataRichiedente || req.startDate || req.date || '');
+        const toDateRaw   = sanitizeDate(req.dataCambio      || req.startDate || req.date || '');
+        const fromDateDisplay = fromDateRaw ? fromDateRaw.split('-').reverse().join('/') : '';
+        const toDateDisplay   = toDateRaw   ? toDateRaw.split('-').reverse().join('/')   : '';
+        const isCrossDate = fromDateRaw && toDateRaw && fromDateRaw !== toDateRaw;
+
         let swapDetail = `<div class="req-detail-row"><span class="req-detail-icon">🔄</span><span>Cambio con: <strong>${cambioName}</strong></span></div>`;
-        if (swapDateDisplay) {
-            swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">📅</span><span>${swapDateDisplay}</span></div>`;
-        }
-        if (fromShiftName && toShiftName) {
-            swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">🔃</span><span>${fromShiftName} ➔ ${toShiftName}</span></div>`;
+        if (isCrossDate) {
+            // Cross-date: mostra ambas as datas e turnos de forma clara
+            swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">📤</span><span>Cede: <strong>${fromDateDisplay}</strong>${fromShiftName ? ' — ' + fromShiftName : ''}</span></div>`;
+            swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">📥</span><span>Riceve: <strong>${toDateDisplay}</strong>${toShiftName ? ' — ' + toShiftName : ''}</span></div>`;
+        } else {
+            // Single-date (legado)
+            if (fromDateDisplay) {
+                swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">📅</span><span>${fromDateDisplay}</span></div>`;
+            }
+            if (fromShiftName && toShiftName) {
+                swapDetail += `<div class="req-detail-row"><span class="req-detail-icon">🔃</span><span>${fromShiftName} ➔ ${toShiftName}</span></div>`;
+            }
         }
         h += swapDetail;
     } else if (req.type==='vacation' || req.type==='FE' || req.type==='AT' || req.type==='OFF' || req.type==='OFF_INJ') {
@@ -2709,6 +2981,11 @@ async function syncAllRequestsToCloud() {
             startDate: r.startDate || r.date || '',
             endDate: r.endDate || r.startDate || r.date || '',
             desc: r.desc || r.reason || '',
+            // Nuove colonne per swap cross-date (vuote per tipi diversi da swap)
+            dataRichiedente: r.dataRichiedente || '',
+            dataCambio: r.dataCambio || '',
+            turnoRichiedente: r.turnoRichiedente || '',
+            turnoCambio: r.turnoCambio || '',
             createdAt: r.createdAt || '',
             approvedAt: r.approvedAt || '',
             approvedBy: r.approvedBy || ''
@@ -3934,3 +4211,4 @@ function removeNurseGlobally(nurseId) {
     renderCalendar();
     toast(`${nurse?.name} non fa più parte dei turni a partire da questo mese.`, 'info');
 }
+

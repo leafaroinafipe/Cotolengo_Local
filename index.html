@@ -322,11 +322,15 @@
     <div class="modal-box">
         <div class="modal-hd"><h3 class="modal-ttl">Cambio Turno</h3><button onclick="closeSwapModal()" class="btn-cls">✕</button></div>
         <div class="modal-body">
+            <div style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.25); border-radius:10px; padding:10px 12px; margin-bottom:12px; font-size:12px; color:var(--text-2, #cbd5e1); line-height:1.45;">
+                💡 <b>Cambio incrociato:</b> selezioni il giorno in cui il/la collega farà il tuo turno, e il giorno in cui tu farai il suo. Le date possono essere diverse.
+            </div>
+            <div class="field-group"><label class="field-label">La tua data (turno che cederai)</label><input type="text" id="swapFromDateDisplay" class="field-input" readonly></div>
             <div class="field-group"><label class="field-label">Il tuo turno attuale</label><input type="text" id="currentShiftDisplay" class="field-input" readonly></div>
             <div class="field-group"><label class="field-label">Cambia con</label>
                 <div class="sel-wrap"><select id="swapNurseSelect" class="field-sel" onchange="onSwapNurseChange()"></select></div>
             </div>
-            <div class="field-group"><label class="field-label">Data del cambio</label><input type="date" id="swapDateInput" class="field-input" onchange="onSwapDateChange()"></div>
+            <div class="field-group"><label class="field-label">Data della controparte (turno che farai)</label><input type="date" id="swapDateInput" class="field-input" onchange="onSwapDateChange()"></div>
             <div class="field-group"><label class="field-label">Il suo turno nella data</label><input type="text" id="targetShiftDisplay" class="field-input" readonly></div>
             <button onclick="submitSwapRequest()" class="btn-submit">Invia Richiesta di Cambio</button>
         </div>
@@ -355,6 +359,43 @@
             <div class="field-group"><label class="field-label">Data</label><input type="text" id="fjDateDisplay" class="field-input" readonly></div>
             <div class="field-group"><label class="field-label">Motivo</label><textarea id="fjReason" class="field-textarea" rows="4" placeholder="Descrivi il motivo..."></textarea></div>
             <button onclick="submitJustifiedAbsence()" class="btn-submit">Invia Richiesta</button>
+        </div>
+    </div>
+</div>
+
+<!-- EDIT REQUEST MODAL (solo per richieste ancora in attesa) -->
+<div id="editRequestModal" class="modal-bd hidden" onclick="closeEditRequestModal(event)">
+    <div class="modal-box">
+        <div class="modal-hd">
+            <h3 class="modal-ttl">✏️ Modifica Richiesta</h3>
+            <button onclick="closeEditRequestModal()" class="btn-cls">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="field-group">
+                <label class="field-label">Tipo</label>
+                <input type="text" id="editReqTypeDisplay" class="field-input" readonly>
+            </div>
+            <div class="field-group">
+                <label class="field-label">Personale</label>
+                <input type="text" id="editReqNurseDisplay" class="field-input" readonly>
+            </div>
+            <div id="editReqSwapNurseGroup" class="field-group" style="display:none">
+                <label class="field-label">Cambia con</label>
+                <div class="sel-wrap"><select id="editReqSwapNurseSelect" class="field-sel"></select></div>
+            </div>
+            <div id="editReqStartDateGroup" class="field-group">
+                <label class="field-label" id="editReqStartDateLabel">Data</label>
+                <input type="date" id="editReqStartDate" class="field-input">
+            </div>
+            <div id="editReqEndDateGroup" class="field-group" style="display:none">
+                <label class="field-label">Data Fine</label>
+                <input type="date" id="editReqEndDate" class="field-input">
+            </div>
+            <div id="editReqReasonGroup" class="field-group" style="display:none">
+                <label class="field-label">Motivo / Descrizione</label>
+                <textarea id="editReqReason" class="field-textarea" rows="3" placeholder="Descrivi il motivo..."></textarea>
+            </div>
+            <button onclick="submitEditRequest()" class="btn-submit">💾 Salva Modifiche</button>
         </div>
     </div>
 </div>
