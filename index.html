@@ -3,15 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="NurseShift Pro — Sistema de Gestão de Escalas de Enfermagem do Cottolengo">
-    <title>NurseShift Pro — Cottolengo</title>
+    <meta name="description" content="NurseShift Pro — Sistema de Gestão de Escalas de Enfermagem do Cotolengo">
+    <title>NurseShift Pro — Cotolengo</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <!-- Inter: pesos enxutos (400/600/700/800). Removidos 500 e 900 — sem uso real, economiza ~80KB. -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <link rel="stylesheet" href="styles.css">
+    <!-- Cache busting: ?v= deve ser incrementado a cada deploy de styles.css ou app.js.
+         Combina com o no-cache acima para garantir que clientes pegam a versão nova
+         mesmo em ambientes onde o browser ignora os meta http-equiv. -->
+    <link rel="stylesheet" href="styles.css?v=3.0">
 </head>
 <body>
 
@@ -55,8 +59,8 @@
                 </svg>
             </div>
             <span class="header-name">NurseShift Pro</span>
-            <span id="cloudStatusIndicator" style="margin-left: 12px; font-size: 11px; padding: 4px 8px; border-radius: 12px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #aaa; display: flex; align-items: center; gap: 6px;">
-                <span id="cloudStatusDot" style="width: 6px; height: 6px; border-radius: 50%; background: #aaa;"></span> 
+            <span id="cloudStatusIndicator" class="cloud-status-chip is-connecting">
+                <span id="cloudStatusDot" class="dot"></span>
                 <span id="cloudStatusText">Connettendo...</span>
             </span>
         </div>
@@ -127,49 +131,34 @@
         </div>
     </div>
 
-    <!-- TAB: REPORTS (dashboard per coordinatore + report individuale per infermiera) -->
+    <!-- TAB: REPORTS -->
     <div id="reportsTab" class="tab-pane">
         <div class="reports-wrap">
             <div class="rpt-header">
-                <h2>Report del Mese</h2>
+                <h2>Report delle Ore</h2>
                 <span class="rpt-month" id="reportMonth"></span>
             </div>
-
-            <!-- Grade de cards-riepilogo (coordinatore: time; infermiera: individual) -->
-            <div id="teamStatsGrid" class="stats-grid"></div>
-
-            <!-- Carga por enfermeira com barra de quota notturna -->
-            <div class="report-section">
-                <h3>Carico per Personale</h3>
-                <div id="teamLoadTable"></div>
+            <div class="stats-grid">
+                <div class="stat-card stat-primary">
+                    <div class="stat-lbl">Totale Lavorato</div>
+                    <div class="stat-val" id="totalHoursReport">0.0h</div>
+                </div>
+                <div class="stat-card stat-success">
+                    <div class="stat-lbl">Giorni Lavorati</div>
+                    <div class="stat-val" id="workDaysReport">0</div>
+                </div>
+                <div class="stat-card stat-warning">
+                    <div class="stat-lbl">Giorni di Riposo</div>
+                    <div class="stat-val" id="restDaysReport">0</div>
+                </div>
+                <div class="stat-card stat-night">
+                    <div class="stat-lbl">Turni di Notte</div>
+                    <div class="stat-val" id="nightShiftsReport">0</div>
+                </div>
             </div>
-
-            <!-- Cobertura diária M/P/N (heatmap com alertas) -->
             <div class="report-section">
-                <h3>Copertura Giornaliera</h3>
-                <div id="dailyCoverageTable"></div>
-            </div>
-
-            <!-- Estatísticas de solicitações do mês por tipo/status -->
-            <div class="report-section">
-                <h3>Richieste del Mese</h3>
-                <div id="requestsStatsTable"></div>
-            </div>
-
-            <!-- Alertas de compliance (quota estrapolata, cobertura zero, sovraccarico) -->
-            <div class="report-section">
-                <h3>Alert di Compliance</h3>
-                <div id="complianceAlerts"></div>
-            </div>
-
-            <!-- Seções mantidas para a view individuale (enfermeira, não coordenadora) -->
-            <div class="report-section" style="display:none">
                 <h3>Distribuzione dei Turni</h3>
                 <div id="shiftsTable"></div>
-                <span id="totalHoursReport" style="display:none"></span>
-                <span id="workDaysReport"   style="display:none"></span>
-                <span id="restDaysReport"   style="display:none"></span>
-                <span id="nightShiftsReport" style="display:none"></span>
             </div>
             <div id="nightQuotaSection" class="report-section" style="display:none">
                 <h3>Quota Turni Notturni</h3>
@@ -274,7 +263,6 @@
                         <button class="req-filter-chip" data-filter="pending" onclick="setReqStatusFilter('pending', this)">⏳ In attesa</button>
                         <button class="req-filter-chip" data-filter="approved" onclick="setReqStatusFilter('approved', this)">✅ Approvati</button>
                         <button class="req-filter-chip" data-filter="rejected" onclick="setReqStatusFilter('rejected', this)">❌ Rifiutati</button>
-                        <button class="req-filter-chip" onclick="manualRetrySync(event)" style="background:linear-gradient(135deg,#10b981,#059669);color:#fff;border:none" title="Forza sincronizzazione col cloud">🔄 Aggiorna</button>
                     </div>
                     <div class="req-filter-selects">
                         <select id="reqFilterNurse" class="req-filter-select" onchange="applyReqFilters()">
@@ -338,11 +326,15 @@
     <div class="modal-box">
         <div class="modal-hd"><h3 class="modal-ttl">Cambio Turno</h3><button onclick="closeSwapModal()" class="btn-cls">✕</button></div>
         <div class="modal-body">
+            <div style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.25); border-radius:10px; padding:10px 12px; margin-bottom:12px; font-size:12px; color:var(--text-2, #cbd5e1); line-height:1.45;">
+                💡 <b>Cambio incrociato:</b> selezioni il giorno in cui il/la collega farà il tuo turno, e il giorno in cui tu farai il suo. Le date possono essere diverse.
+            </div>
+            <div class="field-group"><label class="field-label">La tua data (turno che cederai)</label><input type="text" id="swapFromDateDisplay" class="field-input" readonly></div>
             <div class="field-group"><label class="field-label">Il tuo turno attuale</label><input type="text" id="currentShiftDisplay" class="field-input" readonly></div>
             <div class="field-group"><label class="field-label">Cambia con</label>
                 <div class="sel-wrap"><select id="swapNurseSelect" class="field-sel" onchange="onSwapNurseChange()"></select></div>
             </div>
-            <div class="field-group"><label class="field-label">Data del cambio</label><input type="date" id="swapDateInput" class="field-input" onchange="onSwapDateChange()"></div>
+            <div class="field-group"><label class="field-label">Data della controparte (turno che farai)</label><input type="date" id="swapDateInput" class="field-input" onchange="onSwapDateChange()"></div>
             <div class="field-group"><label class="field-label">Il suo turno nella data</label><input type="text" id="targetShiftDisplay" class="field-input" readonly></div>
             <button onclick="submitSwapRequest()" class="btn-submit">Invia Richiesta di Cambio</button>
         </div>
@@ -371,6 +363,43 @@
             <div class="field-group"><label class="field-label">Data</label><input type="text" id="fjDateDisplay" class="field-input" readonly></div>
             <div class="field-group"><label class="field-label">Motivo</label><textarea id="fjReason" class="field-textarea" rows="4" placeholder="Descrivi il motivo..."></textarea></div>
             <button onclick="submitJustifiedAbsence()" class="btn-submit">Invia Richiesta</button>
+        </div>
+    </div>
+</div>
+
+<!-- EDIT REQUEST MODAL (solo per richieste ancora in attesa) -->
+<div id="editRequestModal" class="modal-bd hidden" onclick="closeEditRequestModal(event)">
+    <div class="modal-box">
+        <div class="modal-hd">
+            <h3 class="modal-ttl">✏️ Modifica Richiesta</h3>
+            <button onclick="closeEditRequestModal()" class="btn-cls">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="field-group">
+                <label class="field-label">Tipo</label>
+                <input type="text" id="editReqTypeDisplay" class="field-input" readonly>
+            </div>
+            <div class="field-group">
+                <label class="field-label">Personale</label>
+                <input type="text" id="editReqNurseDisplay" class="field-input" readonly>
+            </div>
+            <div id="editReqSwapNurseGroup" class="field-group" style="display:none">
+                <label class="field-label">Cambia con</label>
+                <div class="sel-wrap"><select id="editReqSwapNurseSelect" class="field-sel"></select></div>
+            </div>
+            <div id="editReqStartDateGroup" class="field-group">
+                <label class="field-label" id="editReqStartDateLabel">Data</label>
+                <input type="date" id="editReqStartDate" class="field-input">
+            </div>
+            <div id="editReqEndDateGroup" class="field-group" style="display:none">
+                <label class="field-label">Data Fine</label>
+                <input type="date" id="editReqEndDate" class="field-input">
+            </div>
+            <div id="editReqReasonGroup" class="field-group" style="display:none">
+                <label class="field-label">Motivo / Descrizione</label>
+                <textarea id="editReqReason" class="field-textarea" rows="3" placeholder="Descrivi il motivo..."></textarea>
+            </div>
+            <button onclick="submitEditRequest()" class="btn-submit">💾 Salva Modifiche</button>
         </div>
     </div>
 </div>
@@ -456,6 +485,7 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" defer></script>
-<script src="app.js" defer></script>
+<!-- Cache busting: incrementar ?v= a cada deploy do app.js -->
+<script src="app.js?v=3.0" defer></script>
 </body>
 </html>
